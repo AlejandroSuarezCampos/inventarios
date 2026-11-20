@@ -13,9 +13,10 @@ from tkinter import filedialog, messagebox, ttk
 from . import __version__
 from .campos import (CAMPOS, CAMPOS_POR_CLAVE, CLAVES, DIAS_AVISO_GARANTIA, ESTADOS, dias_aviso,
                      estado_garantia, fecha_a_date, fijar_dias_aviso, mostrar_fecha, normalizar, parsear_fecha)
-from .db import BaseDatos, Conflicto, guardar_config, leer_config, usuario_actual
+from .db import BaseDatos, Conflicto, SinConexion, guardar_config, leer_config, usuario_actual
 from .dialogos import (Cancelado, DialogoCampoMasivo, DialogoColumnas, DialogoEtiquetas, DialogoImportar,
-                       DialogoPreferencias, DialogoTexto, FormularioEquipo)
+                       DialogoPreferencias, DialogoServidor, DialogoTexto, FormularioEquipo)
+from .remoto import ClienteRemoto, ErrorServidor
 from .excel_io import exportar_csv, exportar_excel, exportar_plantilla, leer_excel, leer_texto_tabla
 from .informes import generar_informe, id_desde_qr, periodos_garantia
 from .tema import (C, MODOS, PALETA_GRAFICOS, CampoBusqueda, GraficoBarras, Tema, aplicar_modo,
@@ -55,11 +56,7 @@ class App(tk.Tk):
                 pass
         self._icono()
 
-        try:
-            self.bd = BaseDatos(ruta_bd)
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror(TITULO, f"No se pudo abrir la base de datos:\n{exc}")
-            raise
+        self.bd = self._abrir_almacen(ruta_bd)
         self.bd.copia_automatica()
 
         self.equipos: list[dict] = []
@@ -96,6 +93,123 @@ class App(tk.Tk):
         self.after(300, self._ajustar_disposicion)
         self.after(400, self._aviso_garantias)
         self.after(2000, self._vigilar_cambios)
+
+    # ------------------------------------------------------------ almacén de datos (local o servidor)
+    def _abrir_almacen(self, ruta_bd: str | None = None):
+        if not ruta_bd and self.cfg.get("modo") == "servidor" and self.cfg.get("servidor"):
+            try:
+                return ClienteRemoto(self.cfg["servidor"], self.cfg.get("clave_servidor", ""))
+            except ErrorServidor as exc:
+                messagebox.showwarning(TITULO, f"{exc}\n\nSe abre la copia local de la última sincronización. "
+                                               "Revisa la clave en Archivo → Conectar a un servidor central.")
+                return ClienteRemoto(self.cfg["servidor"], self.cfg.get("clave_servidor", ""), conectar=False)
+        try:
+            return BaseDatos(ruta_bd)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(TITULO, f"No se pudo abrir la base de datos:\n{exc}")
+            raise
+
+    def report_callback_exception(self, tipo, valor, tb):
+        """Errores no previstos: los de conexión se explican en lugar de mostrar un error técnico."""
+        if isinstance(valor, SinConexion):
+            self._cerrar_editor(False)
+            messagebox.showwarning(TITULO, str(valor))
+            self._pintar_conexion()
+            return
+        if isinstance(valor, ErrorServidor):
+            messagebox.showerror(TITULO, str(valor))
+            return
+        super().report_callback_exception(tipo, valor, tb)
+
+    def _pintar_conexion(self):
+        """Indicador de conexión con el servidor (sólo en modo servidor)."""
+        bd = self.bd
+        if not getattr(bd, "remoto", False):
+            self.marco_conexion.pack_forget()
+            self.leyenda_pendiente.pack_forget()
+            return
+        if not self.marco_conexion.winfo_manager():
+            self.marco_conexion.pack(anchor="w", pady=(self.tema.px(2), 0))
+        pend = bd.pendientes
+        if pend and not self.leyenda_pendiente.winfo_manager():
+            self.leyenda_pendiente.pack(side="left")
+        elif not pend and self.leyenda_pendiente.winfo_manager():
+            self.leyenda_pendiente.pack_forget()
+        if bd.en_linea:
+            color, texto = C["verde"], "Conectado"
+            if pend:
+                texto += f" · enviando {pend}"
+        else:
+            ult = bd.ultima_sincronizacion
+            cuando = ""
+            if ult:
+                try:
+                    d = datetime.strptime(ult, "%Y-%m-%d %H:%M:%S")
+                    cuando = f" · datos de {'hoy' if d.date() == date.today() else d.strftime('%d/%m')} {d:%H:%M}"
+                except ValueError:
+                    pass
+            color, texto = C["ambar"], "Sin conexión" + cuando
+            if pend:
+                texto += f" · {pend} pendiente{'s' if pend != 1 else ''}"
+        self.punto_conexion.configure(fg=color)
+        self.lbl_conexion.configure(text=texto)
+
+    def sincronizar(self):
+        if not getattr(self.bd, "remoto", False):
+            return
+        self._cerrar_editor(True)
+        self.configure(cursor="watch")
+        self.update_idletasks()
+        try:
+            res = self.bd.sincronizar()
+        except SinConexion:
+            self.estado.set("Sin conexión con el servidor. Se reintentará automáticamente.")
+            self._pintar_conexion()
+            return
+        finally:
+            self.configure(cursor="")
+        self.recargar()
+        enviados = res.get("enviados", 0)
+        self.estado.set(f"Sincronizado ({datetime.now():%H:%M:%S})" +
+                        (f" · {enviados} equipo(s) enviados al servidor" if enviados else ""))
+
+    def _solo_lectura(self, equipo_id: int) -> bool:
+        """True (y avisa) si el equipo no se puede modificar por falta de conexión."""
+        if self.bd.puede_modificar(equipo_id):
+            return False
+        self.bell()
+        self.estado.set("Sin conexión: sólo se pueden consultar los equipos del servidor y crear equipos nuevos.")
+        return True
+
+    def conectar_servidor(self):
+        d = DialogoServidor(self)
+        self.wait_window(d)
+        if not d.resultado:
+            return
+        url, clave = d.resultado
+        self.cfg.update({"modo": "servidor", "servidor": url, "clave_servidor": clave})
+        self.guardar_cfg()
+        self._cambiar_almacen(ClienteRemoto(url, clave))
+        messagebox.showinfo(TITULO, f"Conectado a {self.bd.descripcion}.\n\nSi se pierde la conexión podrás "
+                                    "consultar los datos y crear equipos nuevos; se enviarán al volver.")
+
+    def _cambiar_almacen(self, nuevo):
+        self._cerrar_editor(True)
+        try:
+            self.bd.cerrar()
+        except Exception:  # noqa: BLE001
+            pass
+        self.bd = nuevo
+        self.recargar()
+
+    def iniciar_servidor(self):
+        if not messagebox.askyesno(TITULO, "Se abrirá el servidor de inventario en este equipo, en una ventana "
+                                           "aparte.\n\nLos demás equipos podrán conectarse a él con la dirección "
+                                           "y la clave que aparecen en esa ventana. ¿Continuar?"):
+            return
+        orden = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable,
+                                                                         str(Path(sys.argv[0]).resolve())]
+        subprocess.Popen(orden + ["--servidor"], close_fds=True)
 
     # ------------------------------------------------------------ configuración
     def guardar_cfg(self):
@@ -224,6 +338,7 @@ class App(tk.Tk):
         ttk.Label(izq, text=titulo, style="Titulo.TLabel").pack(anchor="w")
         var = tk.StringVar()
         ttk.Label(izq, textvariable=var, style="Subtitulo.TLabel").pack(anchor="w")
+        self._cab_izq = izq
         acciones = ttk.Frame(cab)
         acciones.pack(side="right", anchor="s")
         return acciones, var
@@ -249,7 +364,10 @@ class App(tk.Tk):
         m.add_separator()
         m.add_command(label="Crear copia de seguridad…", command=self.copia)
         m.add_command(label="Restaurar copia de seguridad…", command=self.restaurar)
-        m.add_command(label="Usar otra base de datos (p. ej. en red)…", command=self.cambiar_bd)
+        m.add_command(label="Conectar a un servidor central…", command=self.conectar_servidor)
+        m.add_command(label="Sincronizar con el servidor ahora", command=self.sincronizar)
+        m.add_command(label="Usar una base de datos local o en carpeta de red…", command=self.cambiar_bd)
+        m.add_command(label="Iniciar el servidor en este equipo…", command=self.iniciar_servidor)
         m.add_command(label="Abrir carpeta de datos", command=lambda: abrir_archivo(self.bd.ruta.parent))
         m.add_separator()
         m.add_command(label="Preferencias…", accelerator="Ctrl+,", command=self.preferencias)
@@ -373,6 +491,14 @@ class App(tk.Tk):
         self.btn_rehacer.pack(side="right", padx=(0, 8))
         self.btn_deshacer = ttk.Button(acciones, text="↶  Deshacer", style="Plano.TButton", command=self.deshacer)
         self.btn_deshacer.pack(side="right")
+        self.marco_conexion = ttk.Frame(self._cab_izq)
+        self.punto_conexion = tk.Label(self.marco_conexion, text="●", bg=C["fondo"], fg=C["verde"],
+                                       font=(self.tema.familia, 11))
+        self.punto_conexion.pack(side="left")
+        self.lbl_conexion = ttk.Label(self.marco_conexion, text="", style="Secundario.TLabel")
+        self.lbl_conexion.pack(side="left", padx=(px(3), px(4)))
+        ttk.Button(self.marco_conexion, text="Sincronizar", style="Plano.TButton",
+                   command=self.sincronizar).pack(side="left")
 
         # barra de búsqueda y filtros (se reorganiza en dos filas en pantallas estrechas)
         self.barra_filtros = ttk.Frame(p)
@@ -418,6 +544,10 @@ class App(tk.Tk):
             lbl.pack(side="left", padx=(2, px(14)))
             if attr:
                 setattr(self, attr, lbl)
+        self.leyenda_pendiente = ttk.Frame(pie)
+        tk.Label(self.leyenda_pendiente, text="⏳", fg=C["acento"], bg=C["fondo"]).pack(side="left")
+        ttk.Label(self.leyenda_pendiente, text="Pendiente de enviar al servidor", style="Secundario.TLabel").pack(
+            side="left", padx=(2, px(14)))
         ttk.Label(pie, textvariable=self.estado, style="Secundario.TLabel").pack(side="right")
 
         barra_sel = ttk.Frame(p)
@@ -452,6 +582,7 @@ class App(tk.Tk):
         self.tabla.tag_configure("caducada", background=C["rojo_suave"])
         self.tabla.tag_configure("proxima", background=C["ambar_suave"])
         self.tabla.tag_configure("baja", foreground=C["terciario"])
+        self.tabla.tag_configure("pendiente", foreground=C["acento"], background=C["acento_suave"])
         self._aplicar_columnas_visibles()
         self._id_filtro = None
         self._actualizar_textos_aviso()
@@ -618,7 +749,8 @@ class App(tk.Tk):
             sub += f" · {prox} caducan pronto"
         self.sub_inventario.set(sub)
         self.lbl_lateral_total.configure(text=f"{n} equipos registrados")
-        self.lbl_lateral_bd.configure(text=f"Base de datos: {self.bd.ruta.name}")
+        self.lbl_lateral_bd.configure(text=self.bd.descripcion)
+        self._pintar_conexion()
         self.lbl_lateral_usuario.configure(text=f"Usuario: {self.bd.usuario}")
         self.aplicar_filtro()
         self._cambio_pagina()
@@ -699,12 +831,14 @@ class App(tk.Tk):
 
     @staticmethod
     def _valores_fila(eq: dict) -> list:
-        return [eq["id"]] + [mostrar_fecha(eq[c.clave]) if c.tipo == "fecha"
+        return ["⏳" if eq["id"] < 0 else eq["id"]] + [mostrar_fecha(eq[c.clave]) if c.tipo == "fecha"
                              else (eq[c.clave] or "").replace("\n", " ") for c in CAMPOS]
 
     @staticmethod
     def _tags_fila(eq: dict, n: int) -> list[str]:
         tags = []
+        if eq.get("_pendiente"):
+            return ["pendiente"]
         if eq.get("estado") == "Baja":
             tags.append("baja")
         elif eq["_garantia"] in ("caducada", "proxima"):
@@ -806,6 +940,8 @@ class App(tk.Tk):
     # ------------------------------------------------------------ cambios de otras personas
     def _vigilar_cambios(self):
         intervalo = int(self.cfg.get("refresco_seg", 5) or 0)
+        if self.bd.remoto:
+            intervalo = intervalo or 5
         try:
             if intervalo:
                 version = self.bd.version_datos()
@@ -815,8 +951,17 @@ class App(tk.Tk):
                         self._cambios_pendientes = True
                     else:
                         self._cambios_pendientes = False
+                        antes = getattr(self, "_conexion_previa", True)
                         self.recargar()
-                        self.estado.set(f"↻ Actualizado con cambios de otra persona ({datetime.now():%H:%M:%S})")
+                        ahora_ok = getattr(self.bd, "en_linea", True)
+                        if self.bd.remoto and ahora_ok and not antes:
+                            self.estado.set(f"✓ Conexión recuperada · datos sincronizados ({datetime.now():%H:%M:%S})")
+                        elif self.bd.remoto and not ahora_ok and antes:
+                            self.estado.set("Sin conexión con el servidor: puedes consultar y crear equipos nuevos.")
+                        else:
+                            self.estado.set(f"↻ Actualizado con cambios de otra persona ({datetime.now():%H:%M:%S})")
+                self._conexion_previa = getattr(self.bd, "en_linea", True)
+                self._pintar_conexion()
         except Exception:  # noqa: BLE001  (p. ej. carpeta de red no disponible un momento)
             pass
         self.after(max(2, intervalo or 5) * 1000, self._vigilar_cambios)
@@ -859,7 +1004,7 @@ class App(tk.Tk):
     def editar_celda(self, iid: str, clave: str):
         """Abre un campo de edición encima de la celda (Intro/Tab guarda, Esc cancela)."""
         self._cerrar_editor(guardar=False)
-        if clave not in CLAVES or not self.tabla.exists(iid):
+        if clave not in CLAVES or not self.tabla.exists(iid) or self._solo_lectura(int(iid)):
             return
         self.tabla.see(iid)
         self._ver_columna(clave)
@@ -1167,7 +1312,7 @@ class App(tk.Tk):
         valores = eq
         while True:
             f = FormularioEquipo(self, valores, eq.get("nombre_equipo") or eq.get("persona") or f"Equipo {eq['id']}",
-                                 pestana=pestana)
+                                 pestana=pestana, solo_lectura=not self.bd.puede_modificar(equipo_id))
             self.wait_window(f)
             if not f.resultado:
                 self._refrescar_equipo(equipo_id)  # puede haber cambiado (adjuntos, historial)
@@ -1219,6 +1364,10 @@ class App(tk.Tk):
         sel = self.seleccionados()
         if not sel:
             return
+        if any(self._solo_lectura(i) for i in sel):
+            messagebox.showinfo(TITULO, "Sin conexión con el servidor sólo se pueden eliminar los equipos creados "
+                                        "en este equipo que aún están pendientes de enviar.")
+            return
         if len(sel) == 1:
             eq = self.bd.obtener(sel[0]) or {}
             pregunta = (f"¿Eliminar el equipo «{eq.get('nombre_equipo') or '-'}» de "
@@ -1236,6 +1385,10 @@ class App(tk.Tk):
         sel = self.seleccionados()
         if not sel:
             messagebox.showinfo(TITULO, "Selecciona uno o varios equipos.")
+            return
+        if any(self._solo_lectura(i) for i in sel):
+            messagebox.showinfo(TITULO, "Sin conexión con el servidor no se pueden modificar sus equipos; "
+                                        "sólo consultarlos y crear equipos nuevos.")
             return
         etiqueta = CAMPOS_POR_CLAVE[clave].etiqueta
         with self.bd.operacion(f"{etiqueta} en {len(sel)} equipo{'s' if len(sel) != 1 else ''}"):
@@ -1458,6 +1611,10 @@ class App(tk.Tk):
             messagebox.showinfo(TITULO, f"Copia de seguridad guardada en:\n{destino}")
 
     def restaurar(self):
+        if self.bd.remoto:
+            messagebox.showinfo(TITULO, "Con un servidor central, las copias de seguridad se restauran desde la "
+                                        "ventana del servidor. El servidor guarda además una copia automática diaria.")
+            return
         origen = filedialog.askopenfilename(parent=self, filetypes=[("Base de datos", "*.db"), ("Todos", "*.*")],
                                             initialdir=str(self.bd.ruta.parent / "copias"))
         if not origen:
@@ -1478,19 +1635,22 @@ class App(tk.Tk):
         ruta = filedialog.asksaveasfilename(
             parent=self, title="Elegir o crear base de datos", defaultextension=".db",
             filetypes=[("Base de datos", "*.db")], confirmoverwrite=False,
-            initialdir=str(self.bd.ruta.parent), initialfile=self.bd.ruta.name)
+            initialdir=str(self.bd.ruta.parent if not self.bd.remoto else Path.home()), initialfile="inventario.db")
         if not ruta:
+            return
+        if self.bd.remoto and self.bd.pendientes and not messagebox.askyesno(
+                TITULO, f"Hay {self.bd.pendientes} equipo(s) creados sin conexión que aún no se han enviado al "
+                        "servidor. Se enviarán cuando vuelvas a conectarte a él.\n\n¿Cambiar igualmente?"):
             return
         try:
             nueva = BaseDatos(ruta)
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(TITULO, f"No se pudo abrir la base de datos:\n{exc}")
             return
-        self.bd.cerrar()
-        self.bd = nueva
         self.cfg["ruta_bd"] = str(Path(ruta).resolve())
+        self.cfg["modo"] = "local"
         self.guardar_cfg()
-        self.recargar()
+        self._cambiar_almacen(nueva)
         messagebox.showinfo(TITULO, f"Usando la base de datos:\n{ruta}\n\n"
                                     "Se recordará la próxima vez que abras el programa. Si otras personas "
                                     "la usan a la vez, verás sus cambios automáticamente.")
@@ -1519,7 +1679,7 @@ class App(tk.Tk):
         else:
             orden = [sys.executable, str(Path(sys.argv[0]).resolve())]
         try:
-            subprocess.Popen(orden + [str(self.bd.ruta)], close_fds=True)
+            subprocess.Popen(orden + ([] if self.bd.remoto else [str(self.bd.ruta)]), close_fds=True)
         finally:
             self.destroy()
 
@@ -1682,7 +1842,8 @@ class App(tk.Tk):
 
     def acerca(self):
         messagebox.showinfo("Acerca de", f"{TITULO}\nVersión {__version__}\n\n"
-                                         f"Base de datos:\n{self.bd.ruta}\n\n"
+                                         f"{self.bd.descripcion}\n"
+                                         f"{'Copia local' if self.bd.remoto else 'Archivo'}: {self.bd.ruta}\n\n"
                                          f"Adjuntos:\n{self.bd.carpeta_adjuntos()}\n\n"
                                          f"Usuario: {self.bd.usuario}\n\n"
                                          "Copias automáticas diarias en la carpeta «copias».")
@@ -1761,6 +1922,29 @@ def _autoprueba(argv: list[str]) -> int:
             lineas.append(f"tema {modo}: OK ({app.bd.contar()} equipos, usuario {app.bd.usuario})")
             app.after(300, app._salir)
             app.mainloop()
+        # servidor central + cliente con modo sin conexión
+        import time as _t
+        from .remoto import ClienteRemoto, esperar_conexion
+        from .servidor import ServidorInventario
+        srv = ServidorInventario(salida / "servidor", puerto=0, clave="prueba")
+        srv.iniciar()
+        puerto = srv.puerto
+        cli = ClienteRemoto(f"127.0.0.1:{puerto}", "prueba", intervalo=0.3)
+        assert cli.en_linea and cli.insertar({"persona": "En línea"}) > 0
+        srv.detener()
+        fin = _t.time() + 15
+        while cli.en_linea and _t.time() < fin:
+            cli.version_datos()
+            _t.sleep(0.2)
+        assert not cli.en_linea, "no detecta la desconexión"
+        assert cli.insertar({"persona": "Sin conexión"}) < 0 and cli.pendientes == 1
+        srv = ServidorInventario(salida / "servidor", puerto=puerto, clave="prueba")
+        srv.iniciar()
+        assert esperar_conexion(cli, 20) and cli.pendientes == 0, "no se sincronizan los pendientes"
+        assert sorted(e["persona"] for e in srv.bd.listar()) == ["En línea", "Sin conexión"]
+        cli.cerrar()
+        srv.detener()
+        lineas.append(f"servidor: OK (puerto {puerto}, sincronización sin conexión correcta)")
         if os.name == "nt":
             from .detectar import detectar
             datos = detectar()
@@ -1783,6 +1967,9 @@ def main(argv: list[str] | None = None):
             pass
     if argv and argv[0] == "--selftest":
         return _autoprueba(argv[1:])
+    if argv and argv[0] == "--servidor":
+        from .servidor_gui import main as main_servidor
+        return main_servidor(argv[1:])
     ruta_bd = None
     if argv and argv[0].lower().endswith(".db"):
         ruta_bd = argv[0]

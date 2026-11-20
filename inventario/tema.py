@@ -500,6 +500,8 @@ class Tema:
 
         s.configure("Rojo.Plano.TButton", foreground=C["rojo"])
         s.map("Rojo.Plano.TButton", foreground=[("disabled", C["terciario"])])
+        s.configure("Fondo.TCheckbutton", background=C["fondo"], focuscolor=C["fondo"])
+        s.map("Fondo.TCheckbutton", background=[("active", C["fondo"]), ("disabled", C["fondo"])])
         s.configure("TSeparator", background=C["borde_suave"])
         s.configure("TPanedwindow", background=C["fondo"])
 

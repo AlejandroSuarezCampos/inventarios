@@ -7,6 +7,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .campos import CAMPOS, CAMPOS_POR_CLAVE, CLAVES, ESTADOS, fecha_a_date, mostrar_fecha, parsear_fecha
+from .db import SinConexion
 from .excel_io import ResultadoLectura, leer_excel
 from .tema import C, MODOS
 from .ui_comun import (TITULO, Dialogo, abrir_archivo, en_segundo_plano, tabla_con_scroll, tarjeta)
@@ -21,11 +22,18 @@ class Cancelado(Exception):
 # =====================================================================
 class FormularioEquipo(Dialogo):
     def __init__(self, app, equipo: dict | None = None, titulo: str = "Nuevo equipo",
-                 detectar_al_abrir: bool = False, pestana: str = "datos"):
+                 detectar_al_abrir: bool = False, pestana: str = "datos", solo_lectura: bool = False):
         sub = ""
         if equipo and equipo.get("id"):
             sub = " · ".join(x for x in (equipo.get("persona"), equipo.get("delegacion"), equipo.get("num_serie")) if x)
+        if solo_lectura:
+            sub = "Sin conexión con el servidor: sólo lectura" + (f" · {sub}" if sub else "")
+        elif (equipo or {}).get("_pendiente"):
+            sub = "Pendiente de enviar al servidor" + (f" · {sub}" if sub else "")
         super().__init__(app, titulo, sub or "Rellena los datos del equipo y de la persona que lo usa.")
+        if solo_lectura:
+            self.lbl_subtitulo.configure(foreground=C["ambar_texto"])
+        self.solo_lectura = solo_lectura
         self.equipo = equipo
         self.equipo_id = (equipo or {}).get("id")
         self.resultado: dict | None = None
@@ -35,10 +43,11 @@ class FormularioEquipo(Dialogo):
         px = app.tema.px
 
         info = ""
-        if self.equipo_id:
+        if self.equipo_id and self.equipo_id > 0:
             info = (f"ID {self.equipo_id} · creado {equipo.get('creado', '')[:16]} · "
                     f"modificado {equipo.get('modificado', '')[:16]}")
-        pie = self.pie("Guardar", self._guardar, "")
+        pie = self.pie(None if solo_lectura else "Guardar", self._guardar, "",
+                       texto_cancelar="Cerrar" if solo_lectura else "Cancelar")
         self.btn_detectar = ttk.Button(pie, text="⌖  Detectar este equipo", style="Plano.TButton",
                                        command=self.detectar)
         self.btn_detectar.pack(side="left")
@@ -48,6 +57,8 @@ class FormularioEquipo(Dialogo):
         # pestañas (sólo para equipos ya guardados)
         self.paginas: dict[str, ttk.Frame] = {}
         self.botones_pest: dict[str, ttk.Button] = {}
+        if solo_lectura:
+            self.btn_detectar.pack_forget()
         if self.equipo_id:
             barra = ttk.Frame(self.cuerpo)
             barra.pack(fill="x", pady=(0, px(12)))
@@ -67,7 +78,16 @@ class FormularioEquipo(Dialogo):
             self.paginas["adjuntos"] = self._pagina_adjuntos(self.contenedor)
         self.mostrar("datos")
 
-        self.bind("<Return>", lambda e: self._guardar() if not isinstance(e.widget, (tk.Text, ttk.Treeview)) else None)
+        if solo_lectura:
+            for w in self.widgets.values():
+                try:
+                    w.configure(state="disabled")
+                except tk.TclError:
+                    pass
+            for b in self._botones_fecha:
+                b.state(["disabled"])
+        else:
+            self.bind("<Return>", lambda e: self._guardar() if not isinstance(e.widget, (tk.Text, ttk.Treeview)) else None)
         self.widgets["persona"].focus_set()
         self.centrar()
         if self.equipo_id:  # fijar el tamaño para que las pestañas no cambien la ventana
@@ -102,6 +122,7 @@ class FormularioEquipo(Dialogo):
         der.grid(row=0, column=1, sticky="nsew")
         rejilla.rowconfigure(0, weight=1)
 
+        self._botones_fecha: list[ttk.Widget] = []
         secciones = {}
         for cont, clave, titulo_sec, expandir in ((izq, "propietario", "PROPIETARIO DEL ORDENADOR", False),
                                                   (izq, "otros", "ESTADO Y OBSERVACIONES", True),
@@ -135,8 +156,10 @@ class FormularioEquipo(Dialogo):
                 fila.pack(fill="x")
                 w = ttk.Entry(fila, textvariable=var, width=12, style="Blanco.TEntry")
                 w.pack(side="left", fill="x", expand=True)
-                ttk.Button(fila, text="Hoy", style="Blanco.Plano.TButton",
-                           command=lambda v=var: v.set(date.today().strftime("%d/%m/%Y"))).pack(side="left", padx=(4, 0))
+                b_hoy = ttk.Button(fila, text="Hoy", style="Blanco.Plano.TButton",
+                                   command=lambda v=var: v.set(date.today().strftime("%d/%m/%Y")))
+                b_hoy.pack(side="left", padx=(4, 0))
+                self._botones_fecha.append(b_hoy)
                 if campo.clave == "fin_garantia":
                     mb = ttk.Menubutton(fila, text="+ años", style="Blanco.Plano.TButton")
                     menu = tk.Menu(mb, tearoff=False)
@@ -145,6 +168,7 @@ class FormularioEquipo(Dialogo):
                                          command=lambda a=anios: self._garantia_desde_compra(a))
                     mb["menu"] = menu
                     mb.pack(side="left")
+                    self._botones_fecha.append(mb)
                 self.vars[campo.clave] = var
             else:
                 var = tk.StringVar(value=valor or ("Activo" if campo.clave == "estado" else ""))
@@ -185,10 +209,16 @@ class FormularioEquipo(Dialogo):
         p = ttk.Frame(padre)
         barra = ttk.Frame(p)
         barra.pack(fill="x", pady=(0, px(8)))
-        ttk.Button(barra, text="＋  Añadir archivos…", style="Acento.TButton", command=self._adj_anadir).pack(side="left")
+        b_anadir = ttk.Button(barra, text="＋  Añadir archivos…", style="Acento.TButton", command=self._adj_anadir)
+        b_anadir.pack(side="left")
         ttk.Button(barra, text="Abrir", command=self._adj_abrir).pack(side="left", padx=(px(8), 0))
-        ttk.Button(barra, text="Abrir carpeta", command=self._adj_carpeta).pack(side="left", padx=(px(8), 0))
-        ttk.Button(barra, text="Quitar", style="Peligro.TButton", command=self._adj_quitar).pack(side="right")
+        if not self.app.bd.remoto:
+            ttk.Button(barra, text="Abrir carpeta", command=self._adj_carpeta).pack(side="left", padx=(px(8), 0))
+        b_quitar = ttk.Button(barra, text="Quitar", style="Peligro.TButton", command=self._adj_quitar)
+        b_quitar.pack(side="right")
+        if self.solo_lectura:
+            b_anadir.state(["disabled"])
+            b_quitar.state(["disabled"])
         t, marco = tarjeta(p, padding=px(6))
         t.pack(fill="both", expand=True)
         tv = tabla_con_scroll(marco, columns=("nombre", "tipo", "tamano", "fecha"), show="headings")
@@ -198,8 +228,9 @@ class FormularioEquipo(Dialogo):
             tv.column(c, width=px(w), anchor=anc, stretch=c == "nombre")
         tv.bind("<Double-1>", lambda e: self._adj_abrir())
         tv.bind("<Delete>", lambda e: self._adj_quitar())
-        ttk.Label(p, text="Facturas, documentos de garantía, fotos… Se guardan en la carpeta «"
-                          f"{self.app.bd.carpeta_adjuntos().name}» junto a la base de datos.",
+        donde = ("en el servidor central" if self.app.bd.remoto else
+                 f"en la carpeta «{self.app.bd.carpeta_adjuntos().name}» junto a la base de datos")
+        ttk.Label(p, text=f"Facturas, documentos de garantía, fotos… Se guardan {donde}.",
                   style="Secundario.TLabel").pack(anchor="w", pady=(px(6), 0))
         self._tv_adj = tv
         self._pintar_adjuntos()
@@ -208,13 +239,13 @@ class FormularioEquipo(Dialogo):
     def _pintar_adjuntos(self):
         tv = self._tv_adj
         tv.delete(*tv.get_children())
-        archivos = self.app.bd.listar_adjuntos(self.equipo_id)
+        archivos = self.app.bd.info_adjuntos(self.equipo_id)
         for a in archivos:
-            st = a.stat()
-            tam = st.st_size
+            tam = int(a.get("tamano", 0))
             tam_txt = f"{tam / 1024 / 1024:.1f} MB" if tam > 1024 * 1024 else f"{max(1, tam // 1024)} KB"
-            tv.insert("", "end", iid=a.name, values=(a.name, a.suffix.lstrip(".").upper(), tam_txt,
-                                                     datetime.fromtimestamp(st.st_mtime).strftime("%d/%m/%Y %H:%M")))
+            tv.insert("", "end", iid=a["nombre"], values=(
+                a["nombre"], Path(a["nombre"]).suffix.lstrip(".").upper(), tam_txt,
+                datetime.fromtimestamp(a.get("fecha", 0)).strftime("%d/%m/%Y %H:%M")))
         if "adjuntos" in self.botones_pest:
             self.botones_pest["adjuntos"].configure(text=f"Adjuntos ({len(archivos)})")
 
@@ -223,6 +254,9 @@ class FormularioEquipo(Dialogo):
         for r in rutas:
             try:
                 self.app.bd.anadir_adjunto(self.equipo_id, r)
+            except SinConexion as exc:
+                messagebox.showwarning(TITULO, str(exc), parent=self)
+                break
             except OSError as exc:
                 messagebox.showerror(TITULO, f"No se pudo copiar «{Path(r).name}»:\n{exc}", parent=self)
         self._pintar_adjuntos()
@@ -232,7 +266,11 @@ class FormularioEquipo(Dialogo):
 
     def _adj_abrir(self):
         for nombre in self._adj_sel()[:5]:
-            abrir_archivo(self.app.bd.carpeta_adjuntos(self.equipo_id) / nombre)
+            try:
+                abrir_archivo(self.app.bd.ruta_adjunto(self.equipo_id, nombre))
+            except SinConexion as exc:
+                messagebox.showwarning(TITULO, str(exc), parent=self)
+                return
 
     def _adj_carpeta(self):
         carpeta = self.app.bd.carpeta_adjuntos(self.equipo_id)
@@ -245,8 +283,11 @@ class FormularioEquipo(Dialogo):
             return
         if messagebox.askyesno(TITULO, f"¿Quitar {len(sel)} adjunto(s) de este equipo?\n\n"
                                        "Se mueven a la papelera de adjuntos, no se borran definitivamente.", parent=self):
-            for nombre in sel:
-                self.app.bd.eliminar_adjunto(self.equipo_id, nombre)
+            try:
+                for nombre in sel:
+                    self.app.bd.eliminar_adjunto(self.equipo_id, nombre)
+            except SinConexion as exc:
+                messagebox.showwarning(TITULO, str(exc), parent=self)
             self._pintar_adjuntos()
 
     # -------------------------------------------------------------- detección
@@ -445,7 +486,14 @@ class DialogoImportar(Dialogo):
         t.pack(fill="x")
         self.modo = tk.StringVar(value="omitir_identicas" if (self.identicas or self.repetidas) else "anadir")
         for valor, texto in self.OPCIONES:
-            ttk.Radiobutton(op, text=texto, value=valor, variable=self.modo).pack(anchor="w")
+            rb = ttk.Radiobutton(op, text=texto, value=valor, variable=self.modo)
+            rb.pack(anchor="w")
+            if valor == "reemplazar" and not app.bd.en_linea:
+                rb.state(["disabled"])
+        if not app.bd.en_linea:
+            ttk.Label(op, text="Sin conexión con el servidor: los equipos se guardarán como pendientes y se "
+                               "enviarán al servidor cuando vuelva la conexión.", style="EnTarjetaSec.TLabel",
+                      wraplength=px(900)).pack(anchor="w", pady=(px(4), 0))
 
         ttk.Label(self.cuerpo, text="VISTA PREVIA", style="Seccion.TLabel").pack(anchor="w", padx=px(4),
                                                                                pady=(px(14), px(6)))
@@ -503,9 +551,13 @@ class DialogoImportar(Dialogo):
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(TITULO, f"Error durante la importación. No se ha guardado nada.\n\n{exc}", parent=self)
             return
+        if None in self.ids_nuevos:  # con servidor los ID llegan al terminar la operación
+            self.ids_nuevos = list(getattr(bd, "ultimos_ids", []))
         self.importado = True
         self.destroy()
         texto = f"Importación completada.\n\nEquipos añadidos: {nuevos}"
+        if bd.remoto and not bd.en_linea:
+            texto += " (pendientes de enviar al servidor)"
         if omitidos:
             texto += f"\nFilas idénticas omitidas: {omitidos}"
         texto += "\n\nSi algo no ha ido como esperabas, Ctrl+Z deshace la importación completa."
@@ -770,4 +822,66 @@ class DialogoTexto(Dialogo):
     def _aceptar(self):
         if self.var.get().strip():
             self.resultado = self.var.get().strip()
+            self.destroy()
+
+
+# =====================================================================
+#  Conexión a un servidor central
+# =====================================================================
+class DialogoServidor(Dialogo):
+    def __init__(self, app):
+        super().__init__(app, "Conectar a un servidor central",
+                         "Los datos se guardarán en el servidor. Sin conexión podrás consultar la última copia "
+                         "y crear equipos nuevos.")
+        self.resultado: tuple[str, str] | None = None
+        cfg = app.cfg
+        px = app.tema.px
+        self.var_url = tk.StringVar(value=cfg.get("servidor", ""))
+        self.var_clave = tk.StringVar(value=cfg.get("clave_servidor", ""))
+        pie = self.pie("Conectar", self._conectar)
+        ttk.Button(pie, text="Probar conexión", style="Plano.TButton", command=self._probar).pack(side="left")
+        t, inn = tarjeta(self.cuerpo)
+        t.pack(fill="both", expand=True)
+        ttk.Label(inn, text="Dirección del servidor", style="EnTarjetaCampo.TLabel").pack(anchor="w")
+        e = ttk.Entry(inn, textvariable=self.var_url, width=44, style="Blanco.TEntry")
+        e.pack(fill="x", pady=(px(2), 0))
+        ttk.Label(inn, text="Por ejemplo 192.168.1.20:8765 (aparece en la ventana del servidor)",
+                  style="EnTarjetaSec.TLabel").pack(anchor="w", pady=(px(2), px(10)))
+        ttk.Label(inn, text="Clave", style="EnTarjetaCampo.TLabel").pack(anchor="w")
+        ttk.Entry(inn, textvariable=self.var_clave, width=44, style="Blanco.TEntry", show="•").pack(
+            fill="x", pady=(px(2), 0))
+        self.lbl = ttk.Label(inn, text="", style="EnTarjetaSec.TLabel", wraplength=px(420))
+        self.lbl.pack(anchor="w", pady=(px(10), 0))
+        e.focus_set()
+        self.bind("<Return>", lambda ev: self._conectar())
+        self.centrar()
+
+    def _probar(self) -> bool:
+        from .remoto import ErrorServidor, probar_conexion
+        self.lbl.configure(text="Conectando…", foreground=C["secundario"])
+        self.update_idletasks()
+        try:
+            info = probar_conexion(self.var_url.get(), self.var_clave.get())
+        except (SinConexion, ErrorServidor, ValueError) as exc:
+            texto = str(exc).split("\n")[0] if not isinstance(exc, SinConexion) else \
+                "No se puede conectar. Comprueba la dirección, que el servidor esté en marcha y el cortafuegos."
+            self.lbl.configure(text="✕  " + texto, foreground=C["rojo"])
+            return False
+        self.lbl.configure(text=f"✓  Conectado a «{info.get('servidor')}» · {info.get('equipos')} equipos · "
+                                f"versión {info.get('version')}", foreground=C["verde"])
+        return True
+
+    def _conectar(self):
+        if self._probar():
+            from .remoto import normalizar_url
+            self.resultado = (normalizar_url(self.var_url.get()), self.var_clave.get())
+            self.destroy()
+        elif messagebox.askyesno(TITULO, "Ahora no hay conexión con ese servidor.\n\n¿Guardar la configuración "
+                                         "igualmente? Se trabajará sin conexión hasta que responda.", parent=self):
+            from .remoto import normalizar_url
+            try:
+                self.resultado = (normalizar_url(self.var_url.get()), self.var_clave.get())
+            except ValueError as exc:
+                messagebox.showerror(TITULO, str(exc), parent=self)
+                return
             self.destroy()

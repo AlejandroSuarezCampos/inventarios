@@ -46,6 +46,7 @@ Source: "..\dist\{#MyAppExe}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"
+Name: "{group}\Servidor de inventario"; Filename: "{app}\{#MyAppExe}"; Parameters: "--servidor"; Comment: "Pone este equipo como servidor central del inventario"
 Name: "{group}\Desinstalar {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; Tasks: escritorio
 

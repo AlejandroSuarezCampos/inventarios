@@ -58,8 +58,31 @@ Para publicar una versión «oficial» se crea una etiqueta `vX.Y.Z` (con la ver
   etiquetas (Brother, DYMO). Al **escanear el QR** con un lector (o escribirlo en el buscador) se abre la
   ficha del equipo; desde un móvil se lee el nombre, nº de serie y persona.
 
+### Servidor central y trabajo sin conexión
+Los datos pueden centralizarse en un equipo o servidor:
+
+1. En el equipo central, abre **«Servidor de inventario»** (menú Inicio) o ejecuta
+   `InventarioPC.exe --servidor`. La ventana muestra la **dirección** (p. ej. `192.168.1.20:8765`) y la
+   **clave**. Marca «Iniciar el servidor al encender el equipo» para que arranque solo. La primera vez,
+   Windows pedirá permiso en el cortafuegos: pulsa «Permitir».
+2. En cada equipo: *Archivo → Conectar a un servidor central* y escribe la dirección y la clave.
+
+Funcionamiento:
+* **Con conexión** todo se guarda directamente en el servidor (también adjuntos e historial) y se ven los
+  cambios de los demás al momento. Deshacer funciona por usuario.
+* **Sin conexión** (servidor apagado, portátil fuera de la oficina…) el programa sigue abierto con la copia
+  de la **última sincronización**: se puede **consultar todo** (sólo lectura) y **crear equipos nuevos**
+  (también importarlos o pegarlos desde Excel y añadirles adjuntos). Aparecen marcados con ⏳.
+* **Al volver la conexión** los equipos pendientes se envían solos al servidor (o con «Sincronizar»). Como
+  ningún campo actúa de clave, nunca chocan con los del servidor, y un corte a mitad de envío no los duplica.
+* El servidor guarda una **copia automática diaria** (las 30 últimas) y desde su ventana se puede restaurar.
+* Para usarlo fuera de la oficina hace falta llegar a la red del servidor (p. ej. por VPN). La comunicación
+  va protegida por la clave pero sin cifrar: no expongas el puerto directamente a Internet.
+* Opciones: `--puerto 9000` (otro puerto), `--datos D:\Inventario` (otra carpeta), `--sin-ventana`.
+
 ### Varias personas a la vez
-* La base de datos puede estar en una **carpeta compartida de red** (*Archivo → Usar otra base de datos*).
+* Con el **servidor central** (recomendado) o con la base de datos en una **carpeta compartida de red**
+  (*Archivo → Usar una base de datos local o en carpeta de red*).
 * Los cambios de otras personas aparecen solos (intervalo configurable).
 * Al guardar sólo se aplican los campos que has cambiado tú; si otra persona ha cambiado **los mismos
   campos** mientras editabas, el programa avisa y deja elegir qué valor conservar (nunca se sobrescribe sin avisar).
@@ -115,6 +138,9 @@ python -m pytest -q tests
 | `inventario/detectar.py` | Detección de los datos del equipo (Windows: CIM/registro) |
 | `inventario/informes.py` | Informe PDF y etiquetas QR |
 | `inventario/pdf.py` | Generador de PDF mínimo |
+| `inventario/servidor.py` | Servidor central (HTTP + JSON) |
+| `inventario/servidor_gui.py` | Ventana del servidor |
+| `inventario/remoto.py` | Cliente del servidor con copia local y modo sin conexión |
 | `installer/InventarioPC.iss` | Instalador (Inno Setup) |
 | `InventarioPC.spec` | Configuración de PyInstaller |
 | `.github/workflows/build.yml` | Compilación automática del .exe en Windows |

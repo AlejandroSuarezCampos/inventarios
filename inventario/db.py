@@ -106,8 +106,17 @@ class Conflicto(Exception):
         return "\n".join(lineas)
 
 
+class SinConexion(Exception):
+    """La operación necesita el servidor y no hay conexión."""
+
+
 class BaseDatos:
-    def __init__(self, ruta: str | os.PathLike | None = None):
+    # Propiedades comunes con el cliente de servidor (ver remoto.py)
+    remoto = False
+    en_linea = True
+
+    def __init__(self, ruta: str | os.PathLike | None = None, varios_hilos: bool = False):
+        self._varios_hilos = varios_hilos
         self.ruta = Path(ruta) if ruta else ruta_bd_por_defecto()
         self.ruta.parent.mkdir(parents=True, exist_ok=True)
         self.usuario = usuario_actual()
@@ -119,7 +128,7 @@ class BaseDatos:
 
     def _conectar(self) -> None:
         # timeout alto: en una carpeta de red otra persona puede tener la BD bloqueada un instante
-        self.con = sqlite3.connect(str(self.ruta), timeout=15)
+        self.con = sqlite3.connect(str(self.ruta), timeout=15, check_same_thread=not self._varios_hilos)
         self.con.row_factory = sqlite3.Row
         self.con.execute("PRAGMA foreign_keys = ON")
         self.con.execute("PRAGMA busy_timeout = 15000")
@@ -155,7 +164,33 @@ class BaseDatos:
         if "usuario" not in hist:
             self.con.execute("ALTER TABLE historial ADD COLUMN usuario TEXT NOT NULL DEFAULT ''")
         self.con.execute("CREATE INDEX IF NOT EXISTS idx_hist_equipo ON historial(equipo_id)")
+        # Contador de revisión: cambia con cualquier alta, modificación o baja (lo usan los clientes)
+        self.con.executescript("""
+            CREATE TABLE IF NOT EXISTS meta (clave TEXT PRIMARY KEY, valor INTEGER NOT NULL DEFAULT 0);
+            INSERT OR IGNORE INTO meta (clave, valor) VALUES ('revision', 0);
+            CREATE TRIGGER IF NOT EXISTS rev_ins AFTER INSERT ON equipos
+                BEGIN UPDATE meta SET valor = valor + 1 WHERE clave = 'revision'; END;
+            CREATE TRIGGER IF NOT EXISTS rev_upd AFTER UPDATE ON equipos
+                BEGIN UPDATE meta SET valor = valor + 1 WHERE clave = 'revision'; END;
+            CREATE TRIGGER IF NOT EXISTS rev_del AFTER DELETE ON equipos
+                BEGIN UPDATE meta SET valor = valor + 1 WHERE clave = 'revision'; END;
+        """)
         self.con.commit()
+
+    def revision(self) -> int:
+        """Número que aumenta con cada cambio en los equipos."""
+        return self.con.execute("SELECT valor FROM meta WHERE clave='revision'").fetchone()[0]
+
+    @property
+    def descripcion(self) -> str:
+        return f"Base de datos: {self.ruta.name}"
+
+    @property
+    def pendientes(self) -> int:
+        return 0
+
+    def puede_modificar(self, equipo_id: int) -> bool:
+        return True
 
     def cerrar(self) -> None:
         self.con.close()
@@ -442,6 +477,27 @@ class BaseDatos:
             return []
         return sorted((p for p in carpeta.iterdir() if p.is_file()), key=lambda p: p.name.lower())
 
+    def info_adjuntos(self, equipo_id: int) -> list[dict]:
+        res = []
+        for p in self.listar_adjuntos(equipo_id):
+            st = p.stat()
+            res.append({"nombre": p.name, "tamano": st.st_size, "fecha": st.st_mtime})
+        return res
+
+    def ruta_adjunto(self, equipo_id: int, nombre: str) -> Path:
+        return self.carpeta_adjuntos(equipo_id) / nombre
+
+    def todos_adjuntos(self) -> dict[str, list[dict]]:
+        base = self.carpeta_adjuntos()
+        res: dict[str, list[dict]] = {}
+        if base.is_dir():
+            for d in base.iterdir():
+                if d.is_dir() and d.name.isdigit():
+                    info = self.info_adjuntos(int(d.name))
+                    if info:
+                        res[d.name] = info
+        return res
+
     def contar_adjuntos(self, equipo_id: int) -> int:
         return len(self.listar_adjuntos(equipo_id))
 
@@ -518,5 +574,5 @@ class BaseDatos:
                 pass
 
 
-__all__ = ["BaseDatos", "CAMPOS", "Conflicto", "carpeta_datos", "leer_config", "guardar_config",
+__all__ = ["BaseDatos", "CAMPOS", "Conflicto", "SinConexion", "carpeta_datos", "leer_config", "guardar_config",
            "usuario_actual"]
