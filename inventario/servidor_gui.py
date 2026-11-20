@@ -83,10 +83,15 @@ class VentanaServidor(tk.Tk):
         b.grid(row=1, column=2, pady=(px(6), 0))
         ttk.Button(b, text="Copiar", style="Blanco.Plano.TButton", command=lambda: self._copiar(srv.clave)).pack(side="left")
         ttk.Button(b, text="Cambiar", style="Blanco.Plano.TButton", command=self._nueva_clave).pack(side="left")
+        ttk.Label(inn, text="Red", style="EnTarjetaCampo.TLabel").grid(row=2, column=0, sticky="w", pady=(px(6), 0))
+        self.lbl_red = ttk.Label(inn, text="", style="EnTarjeta.TLabel")
+        self.lbl_red.grid(row=2, column=1, columnspan=2, sticky="w", padx=px(12), pady=(px(6), 0))
         ttk.Label(inn, text="En cada equipo: Archivo → Conectar a un servidor central, y escribe la dirección y la "
-                            "clave. La primera vez, Windows puede pedir permiso en el cortafuegos: pulsa «Permitir».",
+                            "clave. Sólo se atiende a equipos de la misma red local: desde otras redes (Internet, "
+                            "VPN…) los equipos trabajan sin conexión y envían lo que creen al volver a esta red. "
+                            "La primera vez, Windows puede pedir permiso en el cortafuegos: pulsa «Permitir».",
                   style="EnTarjetaSec.TLabel", wraplength=px(760), justify="left").grid(
-            row=2, column=0, columnspan=3, sticky="w", pady=(px(10), 0))
+            row=3, column=0, columnspan=3, sticky="w", pady=(px(10), 0))
 
         opciones = ttk.Frame(cuerpo)
         opciones.pack(fill="x", pady=(px(10), 0))
@@ -181,6 +186,7 @@ class VentanaServidor(tk.Tk):
         self.tv_act.delete(*self.tv_act.get_children())
         for hora, quien, que in list(self.srv.actividad)[:200]:
             self.tv_act.insert("", "end", values=(hora, quien, que))
+        self.lbl_red.configure(text=f"Sólo equipos de la red {self.srv.redes_permitidas()}")
         with self.srv.lock:
             n = self.srv.bd.contar()
         self.lbl_pie.configure(text=f"{n} equipos en el inventario · datos en {self.srv.carpeta}")

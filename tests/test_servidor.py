@@ -152,3 +152,51 @@ def test_clave_incorrecta_y_duplicados(entorno):
     r1 = c._api("POST", "/api/lote", ops)["resultados"]
     r2 = c._api("POST", "/api/lote", ops)["resultados"]    # reintento tras un corte: no se duplica
     assert r1 == r2 and srv.bd.contar() == 1
+
+
+def test_solo_misma_red_servidor(entorno):
+    """El servidor rechaza equipos de otra red; el cliente sigue en modo sin conexión y sincroniza al volver."""
+    from inventario.remoto import FueraDeRed
+    srv, cliente, puerto, _ = entorno
+    c = cliente()
+    i = c.insertar({"persona": "Antes"})
+    srv.permitir_este_equipo = False          # simula que el cliente está en otra red
+    with pytest.raises(FueraDeRed):
+        probar_conexion(f"127.0.0.1:{puerto}", "secreta")
+    assert _esperar_desconexion(c) and c.fuera_de_red
+    with pytest.raises(FueraDeRed):
+        c.actualizar_campo(i, "persona", "X", esperado="Antes")
+    p = c.insertar({"persona": "Creado fuera de la red"})
+    assert p < 0 and srv.bd.contar() == 1      # no ha llegado nada al servidor
+    assert any("red local" in t for _, _, t in srv.actividad)
+    srv.permitir_este_equipo = True           # vuelve a la red
+    assert esperar_conexion(c) and not c.fuera_de_red and c.pendientes == 0
+    assert sorted(e["persona"] for e in srv.bd.listar()) == ["Antes", "Creado fuera de la red"]
+
+
+def test_redes_del_servidor_y_del_cliente(entorno):
+    import ipaddress
+    from inventario.remoto import FueraDeRed, comprobar_misma_red
+    srv, *_ = entorno
+    srv.redes.fijar([ipaddress.IPv4Network("192.168.1.0/24")])
+    assert srv.ip_permitida("192.168.1.50") and srv.ip_permitida("::ffff:192.168.1.7")
+    assert not srv.ip_permitida("192.168.2.5") and not srv.ip_permitida("8.8.8.8")
+    assert not srv.ip_permitida("10.8.0.6")   # p. ej. un cliente por VPN con otra red
+    redes = [ipaddress.IPv4Network("192.168.1.0/24")]
+    comprobar_misma_red("http://192.168.1.20:8765", redes)
+    with pytest.raises(FueraDeRed):
+        comprobar_misma_red("http://10.0.0.5:8765", redes)
+    with pytest.raises(FueraDeRed):
+        comprobar_misma_red("http://203.0.113.9:8765", redes)
+    comprobar_misma_red("http://127.0.0.1:8765", redes)   # el propio equipo
+
+
+def test_interpretar_redes():
+    from inventario.red import interpretar_ip_addr, interpretar_ipconfig
+    es = ("   Dirección IPv4. . . . . . . . . . . . . . : 192.168.1.20(Preferido)\n"
+          "   Máscara de subred . . . . . . . . . . . . : 255.255.255.0\n"
+          "   Puerta de enlace predeterminada . . . . . : 192.168.1.1\n"
+          "   IPv4 Address. . . . . . . . . . . : 10.20.0.15\n"
+          "   Subnet Mask . . . . . . . . . . . : 255.255.0.0\n")
+    assert [str(r) for r in interpretar_ipconfig(es)] == ["192.168.1.0/24", "10.20.0.0/16"]
+    assert [str(r) for r in interpretar_ip_addr("inet 172.16.5.4/20 brd 172.16.15.255")] == ["172.16.0.0/20"]

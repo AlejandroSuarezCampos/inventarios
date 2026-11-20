@@ -863,8 +863,13 @@ class DialogoServidor(Dialogo):
         try:
             info = probar_conexion(self.var_url.get(), self.var_clave.get())
         except (SinConexion, ErrorServidor, ValueError) as exc:
-            texto = str(exc).split("\n")[0] if not isinstance(exc, SinConexion) else \
-                "No se puede conectar. Comprueba la dirección, que el servidor esté en marcha y el cortafuegos."
+            from .remoto import FueraDeRed
+            if isinstance(exc, FueraDeRed):
+                texto = "Este equipo no está en la misma red que el servidor. Sólo se puede conectar desde su red local."
+            elif isinstance(exc, SinConexion):
+                texto = "No se puede conectar. Comprueba la dirección, que el servidor esté en marcha y el cortafuegos."
+            else:
+                texto = str(exc).split("\n")[0]
             self.lbl.configure(text="✕  " + texto, foreground=C["rojo"])
             return False
         self.lbl.configure(text=f"✓  Conectado a «{info.get('servidor')}» · {info.get('equipos')} equipos · "

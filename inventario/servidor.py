@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import __version__
 from .db import BaseDatos, Conflicto, carpeta_datos
+from .red import RedesCacheadas, describir, en_alguna_red
 
 PUERTO_POR_DEFECTO = 8765
 TAMANO_MAXIMO = 300 * 1024 * 1024  # 300 MB por petición (adjuntos)
@@ -78,6 +79,10 @@ class ServidorInventario:
         self.pilas: dict[str, tuple[list, list]] = {}
         self.clientes: dict[str, dict] = {}
         self.actividad: deque = deque(maxlen=300)
+        # Sólo se atiende a equipos de la misma red local que el servidor
+        self.redes = RedesCacheadas(60)
+        self.permitir_este_equipo = True
+        self.rechazados: dict[str, float] = {}
         self.httpd: ThreadingHTTPServer | None = None
         self._hilo: threading.Thread | None = None
         self._parar = threading.Event()
@@ -128,6 +133,19 @@ class ServidorInventario:
                 except Exception:  # noqa: BLE001
                     pass
             self._parar.wait(3600)
+
+    def ip_permitida(self, ip: str) -> bool:
+        """¿La petición viene de un equipo de la misma red local que el servidor?"""
+        ip = ip.split("%")[0]
+        if ip.startswith("::ffff:"):
+            ip = ip[7:]
+        if ip.startswith("127.") or ip == "::1":
+            return self.permitir_este_equipo
+        redes = [r for r in self.redes.obtener() if not r.is_loopback]
+        return en_alguna_red(ip, redes)
+
+    def redes_permitidas(self) -> str:
+        return describir(self.redes.obtener())
 
     def anotar(self, quien: str, texto: str) -> None:
         self.actividad.appendleft((datetime.now().strftime("%H:%M:%S"), quien, texto))
@@ -300,6 +318,14 @@ class _Manejador(BaseHTTPRequestHandler):
 
     def _atender(self, metodo: str):
         srv = self.srv
+        ip = self.client_address[0]
+        if not srv.ip_permitida(ip):
+            self._leer_cuerpo()
+            ahora_ = time.time()
+            if ahora_ - srv.rechazados.get(ip, 0) > 60:   # no llenar la actividad con reintentos
+                srv.anotar(ip, "Rechazado: no está en la red local del servidor")
+            srv.rechazados[ip] = ahora_
+            return self._responder(403, {"error": "fuera_de_red", "redes": srv.redes_permitidas()})
         clave = self.headers.get("X-Clave", "")
         if not hmac.compare_digest(clave.encode(), srv.clave.encode()):
             self._leer_cuerpo()

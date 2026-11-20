@@ -73,11 +73,15 @@ Funcionamiento:
 * **Sin conexión** (servidor apagado, portátil fuera de la oficina…) el programa sigue abierto con la copia
   de la **última sincronización**: se puede **consultar todo** (sólo lectura) y **crear equipos nuevos**
   (también importarlos o pegarlos desde Excel y añadirles adjuntos). Aparecen marcados con ⏳.
+* **Sólo desde la misma red local**: el servidor únicamente atiende a equipos de su propia red (la que
+  muestra su ventana, p. ej. `192.168.1.0/24`). Desde cualquier otra red —Internet, VPN, otra sede— no se
+  puede enviar ni recibir nada: el programa pasa a «Fuera de la red del servidor» y funciona como sin
+  conexión (consultar la última copia y crear equipos nuevos), y lo creado se envía al volver a la red.
+  La comprobación la hacen el cliente y, sobre todo, el servidor, así que no se puede saltar.
 * **Al volver la conexión** los equipos pendientes se envían solos al servidor (o con «Sincronizar»). Como
   ningún campo actúa de clave, nunca chocan con los del servidor, y un corte a mitad de envío no los duplica.
 * El servidor guarda una **copia automática diaria** (las 30 últimas) y desde su ventana se puede restaurar.
-* Para usarlo fuera de la oficina hace falta llegar a la red del servidor (p. ej. por VPN). La comunicación
-  va protegida por la clave pero sin cifrar: no expongas el puerto directamente a Internet.
+* La comunicación va protegida por la clave y limitada a la red local.
 * Opciones: `--puerto 9000` (otro puerto), `--datos D:\Inventario` (otra carpeta), `--sin-ventana`.
 
 ### Varias personas a la vez

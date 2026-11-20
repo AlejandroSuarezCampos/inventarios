@@ -26,9 +26,22 @@ from urllib.parse import quote, urlparse
 
 from .campos import CLAVES
 from .db import BaseDatos, Conflicto, SinConexion, ahora, carpeta_datos, guardar_config, leer_config, usuario_actual
+from .red import RedesCacheadas, en_alguna_red, resolver
 
 MENSAJE_SIN_CONEXION = ("No hay conexión con el servidor.\n\nMientras tanto puedes consultar los datos de la última "
                         "sincronización y crear equipos nuevos: se enviarán al servidor cuando vuelva la conexión.")
+
+
+MENSAJE_FUERA_DE_RED = ("Este equipo no está en la misma red que el servidor, así que no se puede enviar ni recibir "
+                        "nada.\n\nMientras tanto puedes consultar los datos de la última sincronización y crear "
+                        "equipos nuevos: se enviarán al servidor cuando vuelvas a estar en su red.")
+
+
+class FueraDeRed(SinConexion):
+    """El cliente y el servidor no están en la misma red local: no se permite ninguna comunicación."""
+
+    def __init__(self, mensaje: str = MENSAJE_FUERA_DE_RED):
+        super().__init__(mensaje)
 
 
 class ErrorServidor(Exception):
@@ -73,13 +86,34 @@ def _peticion(url: str, clave: str, metodo: str, ruta: str, datos=None, cuerpo: 
             raise Conflicto(c["equipo_id"], [tuple(x) for x in c["campos"]], c["eliminado"]) from None
         if e.code == 401:
             raise ErrorServidor("La clave del servidor no es correcta.") from None
+        if e.code == 403 and info.get("error") == "fuera_de_red":
+            raise FueraDeRed() from None
         raise ErrorServidor(f"El servidor ha respondido con un error ({e.code}): {info.get('error', '')}") from None
     except (urlerror.URLError, socket.timeout, TimeoutError, ConnectionError, OSError) as e:
         raise SinConexion(MENSAJE_SIN_CONEXION) from e
 
 
+def comprobar_misma_red(url: str, redes=None) -> None:
+    """Lanza FueraDeRed si el servidor no está en ninguna de las redes locales de este equipo.
+    (El servidor hace además su propia comprobación, que es la que manda.)"""
+    host = urlparse(url).hostname or ""
+    ip = resolver(host)
+    if ip is None:
+        return  # no se puede resolver: fallará la conexión y se tratará como «sin conexión»
+    if ip.startswith("127."):
+        return
+    if redes is None:
+        from .red import redes_locales
+        redes = redes_locales()
+    redes = [r for r in redes if not r.is_loopback]
+    if redes and not en_alguna_red(ip, redes):
+        raise FueraDeRed()
+
+
 def probar_conexion(url: str, clave: str) -> dict:
-    return _peticion(normalizar_url(url), clave, "GET", "/api/estado", timeout=5)
+    url = normalizar_url(url)
+    comprobar_misma_red(url)
+    return _peticion(url, clave, "GET", "/api/estado", timeout=5)
 
 
 def id_cliente() -> str:
@@ -110,6 +144,8 @@ class ClienteRemoto:
         self.con.row_factory = sqlite3.Row
         self._crear_cache()
         self._en_linea = False
+        self.fuera_de_red = False
+        self._redes = RedesCacheadas(30)
         self._estado: dict = {}
         self._lote: list | None = None
         self._nombre_lote = ""
@@ -173,26 +209,45 @@ class ClienteRemoto:
         return equipo_id < 0 or self._en_linea
 
     # -------------------------------------------------------------- comunicación
+    def _comprobar_red(self, recalcular: bool = False) -> None:
+        redes = self._redes.obtener() if recalcular or not self._redes._cuando else self._redes._redes
+        try:
+            comprobar_misma_red(self.url, redes)
+        except FueraDeRed:
+            self.fuera_de_red = True
+            raise
+
     def _api(self, metodo: str, ruta: str, datos=None, cuerpo: bytes | None = None, timeout: float = 10):
         try:
+            self._comprobar_red()
             res = _peticion(self.url, self.clave, metodo, ruta, datos, cuerpo, timeout, self.cliente, self.usuario)
+        except FueraDeRed:
+            self._en_linea = False
+            self.fuera_de_red = True
+            raise
         except SinConexion:
             self._en_linea = False
             raise
         self._en_linea = True
+        self.fuera_de_red = False
         return res
 
     def _requiere_conexion(self) -> None:
         if not self._en_linea:
-            raise SinConexion(MENSAJE_SIN_CONEXION)
+            raise FueraDeRed() if self.fuera_de_red else SinConexion(MENSAJE_SIN_CONEXION)
 
     def _comprobar_periodicamente(self, intervalo: float) -> None:
         """Hilo en segundo plano: comprueba si el servidor responde (sin tocar la base de datos local)."""
         while not self._parar.wait(intervalo):
             try:
+                self._comprobar_red(recalcular=True)   # la red puede cambiar (portátil, Wi-Fi…)
                 self._hilo_estado = _peticion(self.url, self.clave, "GET", "/api/estado", timeout=3,
                                               cliente=self.cliente, usuario=self.usuario)
                 self._hilo_ok = True
+                self.fuera_de_red = False
+            except FueraDeRed:
+                self.fuera_de_red = True
+                self._hilo_ok = False
             except (SinConexion, ErrorServidor):
                 self._hilo_ok = False
             except Exception:  # noqa: BLE001

@@ -148,7 +148,8 @@ class App(tk.Tk):
                     cuando = f" · datos de {'hoy' if d.date() == date.today() else d.strftime('%d/%m')} {d:%H:%M}"
                 except ValueError:
                     pass
-            color, texto = C["ambar"], "Sin conexión" + cuando
+            estado_txt = "Fuera de la red del servidor" if getattr(bd, "fuera_de_red", False) else "Sin conexión"
+            color, texto = C["ambar"], estado_txt + cuando
             if pend:
                 texto += f" · {pend} pendiente{'s' if pend != 1 else ''}"
         self.punto_conexion.configure(fg=color)
@@ -163,7 +164,9 @@ class App(tk.Tk):
         try:
             res = self.bd.sincronizar()
         except SinConexion:
-            self.estado.set("Sin conexión con el servidor. Se reintentará automáticamente.")
+            self.estado.set("Este equipo no está en la red del servidor: no se puede sincronizar."
+                            if getattr(self.bd, "fuera_de_red", False) else
+                            "Sin conexión con el servidor. Se reintentará automáticamente.")
             self._pintar_conexion()
             return
         finally:
@@ -957,7 +960,9 @@ class App(tk.Tk):
                         if self.bd.remoto and ahora_ok and not antes:
                             self.estado.set(f"✓ Conexión recuperada · datos sincronizados ({datetime.now():%H:%M:%S})")
                         elif self.bd.remoto and not ahora_ok and antes:
-                            self.estado.set("Sin conexión con el servidor: puedes consultar y crear equipos nuevos.")
+                            self.estado.set(("Fuera de la red del servidor" if getattr(self.bd, "fuera_de_red", False)
+                                             else "Sin conexión con el servidor") +
+                                            ": puedes consultar y crear equipos nuevos.")
                         else:
                             self.estado.set(f"↻ Actualizado con cambios de otra persona ({datetime.now():%H:%M:%S})")
                 self._conexion_previa = getattr(self.bd, "en_linea", True)
@@ -1945,6 +1950,15 @@ def _autoprueba(argv: list[str]) -> int:
         cli.cerrar()
         srv.detener()
         lineas.append(f"servidor: OK (puerto {puerto}, sincronización sin conexión correcta)")
+        from .red import describir, redes_locales
+        redes = redes_locales()
+        lineas.append(f"redes locales: {describir(redes)}")
+        assert any(not r.is_loopback for r in redes), "no se detectan las redes locales"
+        srv2 = ServidorInventario(salida / "servidor2", puerto=0, clave="x")
+        srv2.redes.fijar([r for r in redes if not r.is_loopback])
+        assert not srv2.ip_permitida("203.0.113.9") and srv2.ip_permitida(str(next(
+            r for r in redes if not r.is_loopback).network_address + 1))
+        lineas.append("misma red: OK (rechaza direcciones de otras redes)")
         if os.name == "nt":
             from .detectar import detectar
             datos = detectar()
