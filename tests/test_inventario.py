@@ -72,15 +72,37 @@ def test_ida_y_vuelta(tmp_path, excel_usuario):
     assert len(leer_excel(tmp_path / "e.csv").filas) == 2
 
 
-def test_duplicados_y_actualizacion(tmp_path):
+def test_sin_clave_todos_los_campos_editables(tmp_path):
     bd = BaseDatos(tmp_path / "t.db")
-    i = bd.insertar({"num_serie": "abc-123", "persona": "A"})
-    assert bd.buscar_duplicado({"num_serie": "ABC 123"})["id"] == i
-    assert bd.buscar_duplicado({"num_serie": "OTRO", "nombre_equipo": "X"}) is None
-    assert bd.actualizar(i, {"num_serie": "abc-123", "persona": "B"})
-    assert bd.obtener(i)["persona"] == "B"
+    # dos equipos con el mismo nº de serie y nombre conviven sin problema: ningún campo es clave
+    a = bd.insertar({"num_serie": "ABC123", "nombre_equipo": "PC-1", "persona": "A"})
+    b = bd.insertar({"num_serie": "ABC123", "nombre_equipo": "PC-1", "persona": "B"})
+    assert a != b and bd.contar() == 2
+    # cualquier campo, incluido el nº de serie, se puede editar
+    from inventario.campos import CLAVES
+    for clave in CLAVES:
+        assert bd.actualizar_campo(a, clave, f"nuevo-{clave}")
+        assert bd.obtener(a)[clave] == f"nuevo-{clave}"
+    assert bd.obtener(b)["num_serie"] == "ABC123"
     assert any(h["accion"] == "Modificación" for h in bd.historial())
-    bd.eliminar([i])
+    bd.eliminar([a])
+    assert bd.contar() == 1
+
+
+def test_firma_compara_todos_los_campos(tmp_path):
+    bd = BaseDatos(tmp_path / "t.db")
+    bd.insertar({"num_serie": "X1", "persona": "Ana"})
+    firmas = bd.firmas()
+    assert bd.firma({"num_serie": "x1", "persona": " ana "}) in firmas      # idéntico (mayúsculas/espacios)
+    assert bd.firma({"num_serie": "X1", "persona": "Luis"}) not in firmas  # mismo nº de serie, distinto equipo
+
+
+def test_vaciar(tmp_path):
+    bd = BaseDatos(tmp_path / "t.db")
+    bd.insertar({"persona": "A"})
+    bd.insertar({"persona": "B"})
+    assert bd.vaciar() == 2
+    bd.commit()
     assert bd.contar() == 0
 
 

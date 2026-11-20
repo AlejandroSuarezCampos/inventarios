@@ -18,14 +18,19 @@ Cada vez que se sube código, GitHub Actions compila el ejecutable en Windows, l
 
 * Alta, edición, duplicado y baja de equipos (formulario con los mismos bloques que el Excel:
   *Propietario del ordenador* y *Datos del ordenador*, más Estado y Observaciones).
+* **Todos los campos son editables** y **ninguno actúa como clave**: cada equipo tiene un ID interno
+  y puede haber varios con el mismo nº de serie, nombre, persona, etc.
+  * Doble clic en cualquier celda de la tabla para editarla ahí mismo (Intro guarda, Tab pasa al
+    siguiente campo, Esc cancela). F2 edita la fila seleccionada; Intro abre la ficha completa.
+  * *Equipos → Editar un campo en los seleccionados…* cambia cualquier campo en muchos equipos a la vez.
 * **Importar Excel** (`.xlsx`) con el formato de la plantilla (`tests/fixtures/plantilla_original.xlsx`),
   y también `.csv`:
   * Detecta sola la fila de cabeceras (en la plantilla, fila 3) y los datos que van debajo.
   * Reconoce las columnas aunque cambien de orden, de mayúsculas o tengan tildes/erratas
     (`Nombre quipo`, `EXPIACION GARANTIA`…).
-  * Vista previa antes de importar y detección de equipos ya existentes por **Nº de serie**
-    (o nombre de equipo si no hay nº de serie): actualizar, completar sólo campos vacíos,
-    omitir o duplicar.
+  * Vista previa antes de importar y tres modos: añadir todas las filas, añadir saltando las
+    filas **idénticas en todos los campos** a un equipo ya guardado, o reemplazar el inventario
+    completo (con copia de seguridad previa automática).
   * Fechas en formato fecha de Excel o texto (`dd/mm/aaaa`, `aaaa-mm-dd`…).
 * **Exportar a Excel** con el mismo formato de la plantilla (grupos en filas 1‑2, cabeceras en 3‑4,
   datos desde la fila 5, autofiltro, garantías coloreadas). Exporta la vista filtrada, todo o la selección.

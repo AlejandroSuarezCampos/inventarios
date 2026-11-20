@@ -228,9 +228,10 @@ class FormularioEquipo(Dialogo):
         for clave in ("fecha_compra", "fin_garantia"):
             if d[clave]:
                 iso = parsear_fecha(d[clave])
-                if not fecha_a_date(iso):
-                    messagebox.showerror(TITULO, f"La fecha '{d[clave]}' en «{CAMPOS_POR_CLAVE[clave].etiqueta}» "
-                                                 "no es válida.\nUsa el formato DD/MM/AAAA.", parent=self)
+                if not fecha_a_date(iso) and not messagebox.askyesno(
+                        TITULO, f"«{d[clave]}» no es una fecha reconocible (formato DD/MM/AAAA) en "
+                                f"«{CAMPOS_POR_CLAVE[clave].etiqueta}».\n\n¿Guardarlo igualmente como texto?",
+                        parent=self):
                     self.widgets[clave].focus_set()
                     return
                 d[clave] = iso
@@ -242,14 +243,6 @@ class FormularioEquipo(Dialogo):
         if not any(v for k, v in d.items() if k != "estado"):
             messagebox.showwarning(TITULO, "El equipo no tiene ningún dato.", parent=self)
             return
-        dup = self.app.bd.buscar_duplicado(d, excluir_id=(self.equipo or {}).get("id"))
-        if dup:
-            campo = "nº de serie" if d["num_serie"] else "nombre de equipo"
-            if not messagebox.askyesno(
-                    TITULO, f"Ya existe un equipo con el mismo {campo}:\n\n"
-                            f"{dup.get('nombre_equipo') or '-'}  ·  {dup.get('persona') or '-'}  ·  "
-                            f"{dup.get('num_serie') or '-'}\n\n¿Guardar de todos modos?", parent=self):
-                return
         self.resultado = d
         self.destroy()
 
@@ -262,11 +255,12 @@ class _Cancelado(Exception):
 
 
 class DialogoImportar(Dialogo):
+    """Importa las filas del Excel. Ningún campo se usa como clave: cada fila es un equipo."""
     OPCIONES = [
-        ("actualizar", "Actualizar los existentes con los datos del Excel"),
-        ("completar", "Completar sólo los campos vacíos de los existentes"),
-        ("omitir", "Omitir los equipos que ya existen"),
-        ("duplicar", "Añadirlos igualmente como equipos nuevos"),
+        ("omitir_identicas", "Añadir las filas, saltando las que sean idénticas (en todos los campos) "
+                             "a un equipo ya guardado"),
+        ("anadir", "Añadir todas las filas como equipos nuevos"),
+        ("reemplazar", "Reemplazar todo el inventario actual por el contenido del Excel"),
     ]
 
     def __init__(self, app: "App", ruta: Path):
@@ -288,28 +282,27 @@ class DialogoImportar(Dialogo):
         self.geometry(f"{px(1040)}x{px(680)}")
         self.minsize(px(720), px(480))
 
-        # clasificar filas en nuevas / existentes
-        self.existentes: dict[int, dict] = {}
+        # filas idénticas (todos los campos iguales) a equipos guardados o repetidas en el archivo
+        guardadas = app.bd.firmas()
+        self.identicas: set[int] = set()
+        self.repetidas: set[int] = set()
+        vistas: set[tuple] = set()
         for i, fila in enumerate(res.filas):
-            dup = app.bd.buscar_duplicado(fila)
-            if dup:
-                self.existentes[i] = dup
-        vistos, internos = set(), 0
-        for fila in res.filas:
-            k = normalizar(fila.get("num_serie")) or normalizar(fila.get("nombre_equipo"))
-            if k:
-                internos += k in vistos
-                vistos.add(k)
+            f = app.bd.firma(fila)
+            if f in guardadas:
+                self.identicas.add(i)
+            elif f in vistas:
+                self.repetidas.add(i)
+            vistas.add(f)
 
-        self.pie(f"Importar {len(res.filas)} fila(s)", self._importar)
+        self.pie(f"Importar", self._importar)
 
-        # cifras
         cifras = ttk.Frame(self.cuerpo)
         cifras.pack(fill="x")
-        nuevos = len(res.filas) - len(self.existentes)
-        for i, (n, texto, estilo) in enumerate(((len(res.filas), "Filas con datos", "CifraAzul.TLabel"),
-                                                (nuevos, "Equipos nuevos", "CifraVerde.TLabel"),
-                                                (len(self.existentes), "Ya existentes", "CifraAmbar.TLabel"))):
+        for i, (n, texto, estilo) in enumerate((
+                (len(res.filas), "Filas con datos", "CifraAzul.TLabel"),
+                (app.bd.contar(), "Equipos guardados ahora", "CifraGris.TLabel"),
+                (len(self.identicas), "Idénticas a equipos guardados", "CifraAmbar.TLabel"))):
             t, inn = tarjeta(cifras)
             t.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else px(12), 0))
             cifras.columnconfigure(i, weight=1, uniform="cif")
@@ -321,8 +314,8 @@ class DialogoImportar(Dialogo):
             notas.append(("✓", C["verde"], f"Columnas reconocidas en «{hoja}»: {', '.join(cols)}"))
         for hoja, cols in res.columnas_ignoradas.items():
             notas.append(("!", C["ambar"], f"Columnas no reconocidas (se ignoran) en «{hoja}»: {', '.join(cols)}"))
-        if internos:
-            notas.append(("!", C["ambar"], f"{internos} fila(s) repetidas dentro del propio archivo."))
+        if self.repetidas:
+            notas.append(("!", C["ambar"], f"{len(self.repetidas)} fila(s) idénticas a otra fila del propio archivo."))
         for aviso in res.avisos:
             notas.append(("!", C["ambar"], aviso))
         if notas:
@@ -334,17 +327,14 @@ class DialogoImportar(Dialogo):
                 tk.Label(f, text=icono, fg=color, bg=C["fondo"], font=app.tema.fuente_bold, width=2).pack(side="left")
                 ttk.Label(f, text=texto, style="Secundario.TLabel", wraplength=px(940), justify="left").pack(side="left")
 
-        if self.existentes:
-            ttk.Label(self.cuerpo, text="¿QUÉ HACER CON LOS EQUIPOS QUE YA EXISTEN?", style="Seccion.TLabel").pack(
-                anchor="w", padx=px(4), pady=(px(14), px(6)))
-            t, op = tarjeta(self.cuerpo)
-            t.configure(padding=(px(14), px(8)))
-            t.pack(fill="x")
-            self.modo = tk.StringVar(value="actualizar")
-            for valor, texto in self.OPCIONES:
-                ttk.Radiobutton(op, text=texto, value=valor, variable=self.modo).pack(anchor="w")
-        else:
-            self.modo = tk.StringVar(value="actualizar")
+        ttk.Label(self.cuerpo, text="CÓMO IMPORTAR", style="Seccion.TLabel").pack(
+            anchor="w", padx=px(4), pady=(px(14), px(6)))
+        t, op = tarjeta(self.cuerpo)
+        t.configure(padding=(px(14), px(8)))
+        t.pack(fill="x")
+        self.modo = tk.StringVar(value="omitir_identicas" if (self.identicas or self.repetidas) else "anadir")
+        for valor, texto in self.OPCIONES:
+            ttk.Radiobutton(op, text=texto, value=valor, variable=self.modo).pack(anchor="w")
 
         ttk.Label(self.cuerpo, text="VISTA PREVIA", style="Seccion.TLabel").pack(anchor="w", padx=px(4),
                                                                                pady=(px(14), px(6)))
@@ -353,46 +343,51 @@ class DialogoImportar(Dialogo):
         t.pack(fill="both", expand=True)
         cols = ["_estado"] + CLAVES
         tv = tabla_con_scroll(marco, columns=cols, show="headings", height=8)
-        tv.heading("_estado", text="IMPORTACIÓN")
-        tv.column("_estado", width=px(100), stretch=False)
+        tv.heading("_estado", text="FILA")
+        tv.column("_estado", width=px(110), stretch=False)
         for c in CAMPOS:
             tv.heading(c.clave, text=c.etiqueta.upper())
             tv.column(c.clave, width=px(c.ancho), stretch=False)
-        tv.tag_configure("existe", background=C["ambar_suave"])
+        tv.tag_configure("identica", background=C["ambar_suave"])
         for i, fila in enumerate(res.filas[:1000]):
-            existe = i in self.existentes
-            valores = ["● Existe" if existe else "● Nuevo"]
-            valores += [mostrar_fecha(fila[c.clave]) if c.tipo == "fecha" else fila[c.clave] for c in CAMPOS]
-            tv.insert("", "end", values=valores, tags=("existe",) if existe else ())
+            if i in self.identicas:
+                estado, tags = "● Ya guardada", ("identica",)
+            elif i in self.repetidas:
+                estado, tags = "● Repetida", ("identica",)
+            else:
+                estado, tags = "● Nueva", ()
+            valores = [estado] + [mostrar_fecha(fila[c.clave]) if c.tipo == "fecha" else fila[c.clave]
+                                  for c in CAMPOS]
+            tv.insert("", "end", values=valores, tags=tags)
         self.centrar()
 
     def _importar(self):
         bd, modo = self.app.bd, self.modo.get()
-        nuevos = actualizados = omitidos = 0
+        if modo == "reemplazar" and bd.contar() and not messagebox.askyesno(
+                TITULO, f"Se eliminarán los {bd.contar()} equipos actuales y se sustituirán por las "
+                        f"{len(self.res.filas)} filas del Excel.\n(Antes se guarda una copia de seguridad.)\n\n"
+                        "¿Continuar?", icon="warning", parent=self):
+            return
+        nuevos = omitidos = 0
         try:
-            for i, fila in enumerate(self.res.filas):
+            if modo == "reemplazar":
+                bd.copia_seguridad(bd.ruta.parent / "copias" /
+                                   f"antes_de_importar_{datetime.now():%Y%m%d_%H%M%S}.db")
+                bd.vaciar(f"Reemplazado por {self.ruta.name}")
+            vistas = bd.firmas() if modo == "omitir_identicas" else {}
+            for fila in self.res.filas:
                 datos = {k: v for k, v in fila.items() if not k.startswith("_")}
-                existente = self.existentes.get(i)
-                if existente is None:
-                    # puede haberse creado en esta misma importación (fila repetida en el archivo)
-                    existente = bd.buscar_duplicado(datos) if modo != "duplicar" else None
-                if existente is None or modo == "duplicar":
-                    bd.insertar(datos, commit=False)
-                    nuevos += 1
-                elif modo == "omitir":
-                    omitidos += 1
-                else:
-                    if modo == "actualizar":
-                        # no borrar datos existentes con celdas vacías del Excel
-                        datos = {k: (v if v else existente.get(k, "")) for k, v in datos.items()}
-                    else:  # completar
-                        datos = {k: (existente.get(k) or v) for k, v in datos.items()}
-                    if bd.actualizar(existente["id"], datos, commit=False):
-                        actualizados += 1
-                    else:
+                if modo == "omitir_identicas":
+                    f = bd.firma(datos)
+                    if f in vistas:
                         omitidos += 1
+                        continue
+                    vistas[f] = 0
+                bd.insertar(datos, commit=False)
+                nuevos += 1
             bd.registrar(None, self.ruta.name, "Importación",
-                         f"{nuevos} nuevos, {actualizados} actualizados, {omitidos} sin cambios")
+                         f"{nuevos} añadidos, {omitidos} omitidos por ser idénticos"
+                         + (" (inventario reemplazado)" if modo == "reemplazar" else ""))
             bd.commit()
         except Exception as exc:  # noqa: BLE001
             bd.con.rollback()
@@ -400,8 +395,10 @@ class DialogoImportar(Dialogo):
             return
         self.importado = True
         self.destroy()
-        messagebox.showinfo(TITULO, f"Importación completada.\n\nNuevos: {nuevos}\nActualizados: {actualizados}\n"
-                                    f"Sin cambios / omitidos: {omitidos}", parent=self.app)
+        texto = f"Importación completada.\n\nEquipos añadidos: {nuevos}"
+        if omitidos:
+            texto += f"\nFilas idénticas omitidas: {omitidos}"
+        messagebox.showinfo(TITULO, texto, parent=self.app)
 
 
 # =====================================================================
@@ -440,6 +437,9 @@ class App(tk.Tk):
         self.columnas_ocultas: set[str] = set(cfg.get("columnas_ocultas", []))
         self.pagina_actual = 0
         self.estado = tk.StringVar()
+        self._editor = None
+        self._fila_contexto: str | None = None
+        self._clave_contexto: str | None = None
 
         self._menu()
         self._lateral()
@@ -565,8 +565,8 @@ class App(tk.Tk):
         for est in ESTADOS:
             self.menu_estado.add_command(label=est, command=lambda s=est: self.cambiar_campo("estado", s))
         e.add_cascade(label="Cambiar estado de los seleccionados", menu=self.menu_estado)
-        e.add_command(label="Cambiar delegación de los seleccionados…",
-                      command=lambda: self.cambiar_campo_dialogo("delegacion"))
+        e.add_command(label="Editar un campo en los seleccionados…", command=self.cambiar_campo_dialogo)
+        e.add_command(label="Editar celda", accelerator="F2", command=self._f2)
         e.add_separator()
         e.add_command(label="Buscar", accelerator="Ctrl+F", command=self._enfocar_busqueda)
         e.add_command(label="Seleccionar todo", accelerator="Ctrl+A", command=self.seleccionar_todo)
@@ -589,6 +589,9 @@ class App(tk.Tk):
         self.menu_contexto = tk.Menu(self, tearoff=False)
         self.menu_contexto.add_command(label="Editar", command=self.editar)
         self.menu_contexto.add_command(label="Duplicar", command=self.duplicar)
+        self.menu_contexto.add_command(label="Editar esta celda", command=lambda: self._editar_celda_contexto())
+        self.menu_contexto.add_command(label="Editar un campo en la selección…",
+                                       command=lambda: self.cambiar_campo_dialogo(self._clave_contexto))
         self.menu_contexto.add_cascade(label="Cambiar estado", menu=self.menu_estado)
         self.menu_contexto.add_command(label="Copiar fila", command=self.copiar_fila)
         self.menu_contexto.add_separator()
@@ -614,6 +617,10 @@ class App(tk.Tk):
         self.tabla.bind("<Delete>", lambda e: self.eliminar())
         self.tabla.bind("<Return>", lambda e: self.editar())
         self.tabla.bind("<Double-1>", self._doble_click)
+        self.tabla.bind("<F2>", self._f2)
+        self.tabla.bind("<MouseWheel>", lambda e: self._cerrar_editor(True), add="+")
+        self.tabla.bind("<Button-4>", lambda e: self._cerrar_editor(True), add="+")
+        self.tabla.bind("<Button-5>", lambda e: self._cerrar_editor(True), add="+")
         self.tabla.bind("<Button-3>", self._click_derecho)
         self.tabla.bind("<<TreeviewSelect>>", lambda e: self._actualizar_estado())
 
@@ -673,7 +680,7 @@ class App(tk.Tk):
             b = ttk.Button(barra_sel, text=texto, style=estilo, command=cmd)
             b.pack(side="left", padx=(0, px(4)))
             self.botones_seleccion.append(b)
-        ttk.Label(barra_sel, text="Doble clic para editar · clic derecho para más opciones",
+        ttk.Label(barra_sel, text="Doble clic en una celda para editarla · Intro abre la ficha completa · F2 edita",
                   style="Secundario.TLabel").pack(side="right")
 
         t, marco = tarjeta(p)
@@ -832,20 +839,13 @@ class App(tk.Tk):
         self._pintar_tabla()
 
     def _pintar_tabla(self):
+        if getattr(self, "_editor", None):
+            self._cerrar_editor(True)
         seleccion = set(self.tabla.selection())
         self.tabla.delete(*self.tabla.get_children())
         for n, eq in enumerate(self.visibles):
-            valores = [eq["id"]] + [mostrar_fecha(eq[c.clave]) if c.tipo == "fecha"
-                                    else eq[c.clave].replace("\n", " ") for c in CAMPOS]
-            tags = []
-            if eq.get("estado") == "Baja":
-                tags.append("baja")
-            elif eq["_garantia"] in ("caducada", "proxima"):
-                tags.append(eq["_garantia"])
-            if not tags or tags == ["baja"]:
-                if n % 2:
-                    tags.append("par")
-            self.tabla.insert("", "end", iid=str(eq["id"]), values=valores, tags=tags)
+            self.tabla.insert("", "end", iid=str(eq["id"]), values=self._valores_fila(eq),
+                              tags=self._tags_fila(eq, n))
         restaurar = [i for i in seleccion if self.tabla.exists(i)]
         if restaurar:
             self.tabla.selection_set(restaurar)
@@ -856,6 +856,152 @@ class App(tk.Tk):
                 texto += "  ↓" if self.orden[1] else "  ↑"
             self.tabla.heading(clave, text=texto)
         self._actualizar_estado()
+
+    @staticmethod
+    def _valores_fila(eq: dict) -> list:
+        return [eq["id"]] + [mostrar_fecha(eq[c.clave]) if c.tipo == "fecha"
+                             else (eq[c.clave] or "").replace("\n", " ") for c in CAMPOS]
+
+    @staticmethod
+    def _tags_fila(eq: dict, n: int) -> list[str]:
+        tags = []
+        if eq.get("estado") == "Baja":
+            tags.append("baja")
+        elif eq["_garantia"] in ("caducada", "proxima"):
+            tags.append(eq["_garantia"])
+        if (not tags or tags == ["baja"]) and n % 2:
+            tags.append("par")
+        return tags
+
+    def _refrescar_equipo(self, equipo_id: int):
+        """Vuelve a leer un equipo de la BD y actualiza su fila sin repintar toda la tabla."""
+        nuevo = self.bd.obtener(equipo_id)
+        if not nuevo:
+            return
+        nuevo["_texto"] = texto_fila(nuevo)
+        nuevo["_garantia"] = estado_garantia(nuevo.get("fin_garantia", ""))
+        for lista in (self.equipos, self.visibles):
+            for i, eq in enumerate(lista):
+                if eq["id"] == equipo_id:
+                    lista[i] = nuevo
+                    break
+        iid = str(equipo_id)
+        if self.tabla.exists(iid):
+            n = self.tabla.index(iid)
+            self.tabla.item(iid, values=self._valores_fila(nuevo), tags=self._tags_fila(nuevo, n))
+
+    # ------------------------------------------------------------ edición en la propia tabla
+    def _columna_en(self, x: int) -> str | None:
+        col = self.tabla.identify_column(x)  # '#3'
+        try:
+            idx = int(col.lstrip("#")) - 1
+        except ValueError:
+            return None
+        visibles = list(self.tabla["displaycolumns"])
+        if visibles in (["#all"], ("#all",)) or visibles == ["#all"]:
+            visibles = list(self.tabla["columns"])
+        return visibles[idx] if 0 <= idx < len(visibles) else None
+
+    def editar_celda(self, iid: str, clave: str):
+        """Abre un campo de edición encima de la celda (Intro/Tab guarda, Esc cancela)."""
+        self._cerrar_editor(guardar=False)
+        if clave not in CLAVES or not self.tabla.exists(iid):
+            return
+        self.tabla.see(iid)
+        self._ver_columna(clave)
+        self.update_idletasks()
+        caja = self.tabla.bbox(iid, clave)
+        if not caja:
+            return
+        x, y, w, h = caja
+        eq = next((e for e in self.equipos if str(e["id"]) == iid), None)
+        if eq is None:
+            return
+        campo = CAMPOS_POR_CLAVE[clave]
+        valor = mostrar_fecha(eq[clave]) if campo.tipo == "fecha" else (eq[clave] or "")
+        var = tk.StringVar(value=valor)
+        if campo.tipo == "fecha":
+            w_ed = ttk.Entry(self.tabla, textvariable=var, style="Blanco.TEntry")
+        else:
+            valores = ESTADOS if clave == "estado" else self.bd.valores_distintos(clave)
+            w_ed = ttk.Combobox(self.tabla, textvariable=var, values=valores, style="Blanco.TCombobox")
+        alto = max(h, self.tema.px(32))
+        w_ed.place(x=x, y=y + (h - alto) // 2, width=max(w, self.tema.px(140)), height=alto)
+        w_ed.focus_set()
+        w_ed.select_range(0, "end")
+        w_ed.icursor("end")
+        self._editor = (w_ed, var, iid, clave)
+        w_ed.bind("<Return>", lambda e: (self._cerrar_editor(True), self.tabla.focus_set(), "break")[-1])
+        w_ed.bind("<KP_Enter>", lambda e: (self._cerrar_editor(True), self.tabla.focus_set(), "break")[-1])
+        w_ed.bind("<Escape>", lambda e: (self._cerrar_editor(False), self.tabla.focus_set(), "break")[-1])
+        w_ed.bind("<Tab>", lambda e: (self._mover_editor(+1), "break")[-1])
+        w_ed.bind("<ISO_Left_Tab>", lambda e: (self._mover_editor(-1), "break")[-1])
+        w_ed.bind("<Shift-Tab>", lambda e: (self._mover_editor(-1), "break")[-1])
+        w_ed.bind("<FocusOut>", lambda e: self.after(80, self._cerrar_si_sin_foco))
+
+    def _ver_columna(self, clave: str):
+        """Desplaza la tabla horizontalmente para que la columna `clave` quede a la vista."""
+        cols = list(self.tabla["displaycolumns"])
+        if cols in (["#all"],):
+            cols = list(self.tabla["columns"])
+        anchos = [int(self.tabla.column(c, "width")) for c in cols]
+        total = sum(anchos) or 1
+        inicio = sum(anchos[:cols.index(clave)]) if clave in cols else 0
+        fin = inicio + (anchos[cols.index(clave)] if clave in cols else 0)
+        a, b = self.tabla.xview()
+        vis_a, vis_b = a * total, b * total
+        if inicio < vis_a or fin > vis_b:
+            self.tabla.xview_moveto(max(0.0, (inicio - 20) / total))
+
+    def _cerrar_si_sin_foco(self):
+        ed = getattr(self, "_editor", None)
+        if not ed:
+            return
+        try:
+            foco = self.focus_get()
+        except (KeyError, tk.TclError):
+            foco = None
+        # el desplegable del combobox no cuenta como perder el foco
+        if foco is not None and (foco == ed[0] or str(foco).startswith(str(ed[0]))):
+            return
+        if foco is not None and "popdown" in str(foco):
+            return
+        self._cerrar_editor(True)
+
+    def _mover_editor(self, paso: int):
+        ed = getattr(self, "_editor", None)
+        if not ed:
+            return
+        _, _, iid, clave = ed
+        self._cerrar_editor(True)
+        visibles = [c for c in self.tabla["displaycolumns"] if c in CLAVES] or \
+            [c for c in CLAVES if c not in self.columnas_ocultas]
+        i = visibles.index(clave) + paso if clave in visibles else 0
+        if 0 <= i < len(visibles):
+            self.editar_celda(iid, visibles[i])
+
+    def _cerrar_editor(self, guardar: bool):
+        ed = getattr(self, "_editor", None)
+        if not ed:
+            return
+        self._editor = None
+        w_ed, var, iid, clave = ed
+        nuevo = var.get().strip()
+        try:
+            w_ed.destroy()
+        except tk.TclError:
+            pass
+        if not guardar:
+            return
+        if CAMPOS_POR_CLAVE[clave].tipo == "fecha":
+            nuevo = parsear_fecha(nuevo)
+        eq = next((e for e in self.equipos if str(e["id"]) == iid), None)
+        if eq is None or (eq.get(clave) or "") == nuevo:
+            return
+        self.bd.actualizar_campo(int(iid), clave, nuevo)
+        self._refrescar_equipo(int(iid))
+        if self.pagina_actual == 0:
+            self.estado.set(f"Guardado: {CAMPOS_POR_CLAVE[clave].etiqueta} = «{mostrar_fecha(nuevo) if CAMPOS_POR_CLAVE[clave].tipo == 'fecha' else nuevo}»")
 
     def _actualizar_estado(self):
         sel = len(self.tabla.selection())
@@ -948,21 +1094,45 @@ class App(tk.Tk):
         self.bd.commit()
         self.recargar()
 
-    def cambiar_campo_dialogo(self, clave: str):
+    def cambiar_campo_dialogo(self, clave: str | None = None):
+        """Cambia cualquier campo en todos los equipos seleccionados."""
         sel = self.seleccionados()
         if not sel:
             messagebox.showinfo(TITULO, "Selecciona uno o varios equipos.")
             return
-        d = Dialogo(self, f"Cambiar {CAMPOS_POR_CLAVE[clave].etiqueta.lower()}",
-                    f"Nuevo valor para {len(sel)} equipo{'s' if len(sel) != 1 else ''}")
+        d = Dialogo(self, "Editar un campo en la selección",
+                    f"El valor se aplicará a {len(sel)} equipo{'s' if len(sel) != 1 else ''}")
+        etiquetas = [c.etiqueta for c in CAMPOS]
+        var_campo = tk.StringVar(value=CAMPOS_POR_CLAVE[clave].etiqueta if clave else etiquetas[0])
         var = tk.StringVar()
 
+        def clave_actual() -> str:
+            return next(c.clave for c in CAMPOS if c.etiqueta == var_campo.get())
+
         def aceptar():
+            k = clave_actual()
+            valor = var.get().strip()
+            if CAMPOS_POR_CLAVE[k].tipo == "fecha":
+                valor = parsear_fecha(valor)
             d.destroy()
-            self.cambiar_campo(clave, var.get().strip())
+            self.cambiar_campo(k, valor)
         d.pie("Aplicar", aceptar)
-        cb = ttk.Combobox(d.cuerpo, textvariable=var, values=self.bd.valores_distintos(clave), width=40)
+        t, inn = tarjeta(d.cuerpo)
+        t.pack(fill="both", expand=True)
+        ttk.Label(inn, text="Campo", style="EnTarjetaCampo.TLabel").pack(anchor="w", pady=(0, 2))
+        cb_campo = ttk.Combobox(inn, textvariable=var_campo, values=etiquetas, state="readonly", width=40,
+                                style="Blanco.TCombobox")
+        cb_campo.pack(fill="x", pady=(0, self.tema.px(10)))
+        ttk.Label(inn, text="Nuevo valor (vacío = borrar el campo)", style="EnTarjetaCampo.TLabel").pack(
+            anchor="w", pady=(0, 2))
+        cb = ttk.Combobox(inn, textvariable=var, width=40, style="Blanco.TCombobox")
         cb.pack(fill="x")
+
+        def al_cambiar_campo(_e=None):
+            k = clave_actual()
+            cb["values"] = ESTADOS if k == "estado" else self.bd.valores_distintos(k)
+        cb_campo.bind("<<ComboboxSelected>>", al_cambiar_campo)
+        al_cambiar_campo()
         cb.focus_set()
         d.bind("<Return>", lambda e: aceptar())
         d.centrar()
@@ -989,13 +1159,36 @@ class App(tk.Tk):
             self.tabla.focus(iid)
 
     def _doble_click(self, evento):
-        if self.tabla.identify_region(evento.x, evento.y) == "cell":
-            fila = self.tabla.identify_row(evento.y)
-            if fila:
-                self.editar(int(fila))
+        if self.tabla.identify_region(evento.x, evento.y) != "cell":
+            return
+        fila = self.tabla.identify_row(evento.y)
+        if not fila:
+            return
+        clave = self._columna_en(evento.x)
+        if clave in CLAVES:
+            self.editar_celda(fila, clave)
+        else:
+            self.editar(int(fila))
+        return "break"
+
+    def _f2(self, _evento=None):
+        foco = self.tabla.focus() or (self.tabla.selection() or [None])[0]
+        if foco:
+            visibles = [c for c in CLAVES if c not in self.columnas_ocultas]
+            if visibles:
+                self.editar_celda(foco, visibles[0])
+        return "break"
+
+    def _editar_celda_contexto(self):
+        if self._fila_contexto and self._clave_contexto in CLAVES:
+            self.editar_celda(self._fila_contexto, self._clave_contexto)
 
     def _click_derecho(self, evento):
+        self._cerrar_editor(True)
         fila = self.tabla.identify_row(evento.y)
+        clave = self._columna_en(evento.x)
+        self._fila_contexto = fila
+        self._clave_contexto = clave if clave in CLAVES else None
         if fila and fila not in self.tabla.selection():
             self.tabla.selection_set(fila)
         if self.tabla.selection():
@@ -1255,8 +1448,9 @@ class App(tk.Tk):
                "• Datos a partir de la fila siguiente a las cabeceras.\n\n"
                "Columnas reconocidas (da igual el orden, mayúsculas o tildes):\n" +
                ", ".join(c.cabecera for c in CAMPOS) +
-               "\n\nLos equipos se identifican por el Nº DE SERIE (o el nombre de equipo si no hay nº de serie) "
-               "para no duplicarlos al volver a importar.\n\n"
+               "\n\nNingún campo se usa como identificador: cada fila es un equipo y todos los campos "
+               "(también el Nº de serie) se pueden editar. Al importar puedes añadir todas las filas, "
+               "saltar las que sean idénticas en todos los campos o reemplazar el inventario completo.\n\n"
                "Puedes descargar una plantilla vacía desde Archivo → Guardar plantilla Excel vacía.")
         messagebox.showinfo("Formato de importación", txt)
 

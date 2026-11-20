@@ -9,7 +9,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from .campos import CAMPOS, CAMPOS_POR_CLAVE, CLAVES, normalizar
+from .campos import CAMPOS, CAMPOS_POR_CLAVE, CLAVES
 
 APP_NOMBRE = "InventarioPC"
 
@@ -115,17 +115,18 @@ class BaseDatos:
         ).fetchall()
         return [f[0] for f in filas]
 
-    def buscar_duplicado(self, datos: dict, excluir_id: int | None = None) -> dict | None:
-        """Busca un equipo existente con el mismo nº de serie (o, si no hay, mismo nombre de equipo)."""
-        for clave in ("num_serie", "nombre_equipo"):
-            valor = (datos.get(clave) or "").strip()
-            if not valor:
-                continue
-            for f in self.con.execute(f"SELECT * FROM equipos WHERE {clave} <> ''"):
-                if normalizar(f[clave]) == normalizar(valor) and f["id"] != excluir_id:
-                    return dict(f)
-            return None  # si hay nº de serie no se compara por nombre
-        return None
+    @classmethod
+    def firma(cls, datos: dict) -> tuple:
+        """Huella de un equipo con TODOS sus campos (no hay ningún campo que actúe de clave).
+        Dos registros sólo se consideran iguales si coinciden en todos los campos."""
+        d = cls._limpiar(datos)
+        if not d["estado"]:
+            d["estado"] = "Activo"
+        return tuple(" ".join(d[c].split()).casefold() for c in CLAVES)
+
+    def firmas(self) -> dict[tuple, int]:
+        """{firma: id} de todos los equipos guardados."""
+        return {self.firma(dict(f)): f["id"] for f in self.con.execute("SELECT * FROM equipos")}
 
     # ------------------------------------------------------------ escritura
     @staticmethod
@@ -174,6 +175,21 @@ class BaseDatos:
             self.con.commit()
         return True
 
+    def actualizar_campo(self, equipo_id: int, clave: str, valor: str) -> bool:
+        """Cambia un único campo de un equipo (registra el cambio en el historial)."""
+        actual = self.obtener(equipo_id)
+        if actual is None or clave not in CLAVES:
+            return False
+        actual[clave] = valor
+        return self.actualizar(equipo_id, actual)
+
+    def vaciar(self, motivo: str = "") -> int:
+        """Elimina todos los equipos (se usa al reemplazar el inventario por un Excel)."""
+        n = self.contar()
+        self.con.execute("DELETE FROM equipos")
+        self.registrar(None, "(todos)", "Inventario vaciado", motivo or f"{n} equipos eliminados")
+        return n
+
     def eliminar(self, ids: list[int]) -> int:
         n = 0
         for i in ids:
@@ -207,6 +223,7 @@ class BaseDatos:
     # ------------------------------------------------------------ copias
     def copia_seguridad(self, destino: str | os.PathLike) -> Path:
         destino = Path(destino)
+        destino.parent.mkdir(parents=True, exist_ok=True)
         self.con.commit()
         dst = sqlite3.connect(str(destino))
         with dst:
