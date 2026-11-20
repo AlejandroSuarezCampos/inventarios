@@ -1,0 +1,67 @@
+name: Compilar InventarioPC.exe
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+
+      - name: Tests
+        run: python -m pytest -q tests
+
+      - name: Compilar ejecutable
+        run: python -m PyInstaller --noconfirm --clean InventarioPC.spec
+
+      - name: Probar el ejecutable
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "selftest"
+          $p = Start-Process -FilePath "dist\InventarioPC.exe" -ArgumentList "--selftest", "`"$out`"" -PassThru -Wait
+          Get-Content (Join-Path $out "selftest.txt")
+          if ($p.ExitCode -ne 0) { throw "El autotest del .exe ha fallado (código $($p.ExitCode))" }
+          Get-Item dist\InventarioPC.exe | Select-Object Name, Length
+
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: InventarioPC-windows
+          path: dist/InventarioPC.exe
+          if-no-files-found: error
+
+      - name: Publicar versión (tags v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/InventarioPC.exe
+
+      - name: Publicar compilación de la rama
+        if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "Compilación ${{ github.run_number }} (${{ github.ref_name }})"
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          body: |
+            InventarioPC.exe compilado automáticamente desde `${{ github.ref_name }}` (${{ github.sha }}).
+            Descarga `InventarioPC.exe` y ejecútalo; no necesita Python instalado.
+          files: dist/InventarioPC.exe
