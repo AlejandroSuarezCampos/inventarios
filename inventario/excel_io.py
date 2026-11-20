@@ -129,6 +129,50 @@ def leer_csv(ruta: str | Path) -> ResultadoLectura:
     return res
 
 
+def leer_texto_tabla(texto: str, nombre: str = "Portapapeles") -> ResultadoLectura:
+    """Interpreta celdas copiadas de Excel (texto separado por tabuladores).
+
+    Si las filas copiadas incluyen las cabeceras se usan para saber qué es cada columna. Si no,
+    se asume el orden de columnas de la plantilla (PERSONA, USUARIO PC, …), ignorando la columna
+    separadora vacía que la plantilla tiene entre los dos bloques.
+    """
+    res = ResultadoLectura()
+    lineas = [l for l in texto.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    while lineas and not lineas[-1].strip():
+        lineas.pop()
+    filas = [tuple(c.strip() for c in l.split("\t")) for l in lineas]
+    if not filas:
+        res.avisos.append("El portapapeles está vacío.")
+        return res
+    cabeceras = max((len(_mapear_fila(f)) for f in filas[:30]), default=0)
+    if cabeceras >= 2:
+        _procesar_tabla(nombre, filas, res)
+        return res
+
+    ancho = max(len(f) for f in filas)
+    columnas = list(range(ancho))
+    # columna separadora de la plantilla (E): vacía en todas las filas
+    if ancho >= 6 and all((len(f) <= 4 or not f[4]) for f in filas):
+        columnas.pop(4)
+    if ancho - (1 if len(columnas) < ancho else 0) > len(CLAVES):
+        res.avisos.append(f"Se han copiado más columnas ({ancho}) de las que tiene el inventario; "
+                          "las sobrantes se ignoran.")
+    res.hojas_leidas.append(nombre)
+    usadas = list(zip(columnas, CLAVES))
+    res.columnas_reconocidas[nombre] = [CAMPOS_POR_CLAVE[c].etiqueta for _, c in usadas]
+    res.avisos.append("No se han copiado las cabeceras: se asume el orden de columnas de la plantilla. "
+                      "Revisa la vista previa.")
+    for n, fila in enumerate(filas, start=1):
+        datos = {c: "" for c in CLAVES}
+        for i, clave in usadas:
+            if i < len(fila):
+                datos[clave] = _convertir(clave, fila[i])
+        if any(datos.values()):
+            datos["_origen"] = f"{nombre}!{n}"
+            res.filas.append(datos)
+    return res
+
+
 # ---------------------------------------------------------------- exportación
 
 _AZUL = PatternFill("solid", fgColor="1F4E78")

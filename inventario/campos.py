@@ -65,7 +65,18 @@ GRUPOS = {
     "otros": "OTROS",
 }
 
-DIAS_AVISO_GARANTIA = 90
+DIAS_AVISO_GARANTIA = 90  # valor por defecto; configurable en Preferencias
+_dias_aviso = DIAS_AVISO_GARANTIA
+
+
+def dias_aviso() -> int:
+    """Días de antelación con los que se avisa de que una garantía va a caducar."""
+    return _dias_aviso
+
+
+def fijar_dias_aviso(dias: int) -> None:
+    global _dias_aviso
+    _dias_aviso = max(1, int(dias))
 
 
 def normalizar(texto) -> str:
@@ -141,7 +152,7 @@ def mostrar_fecha(iso: str) -> str:
     return d.strftime("%d/%m/%Y") if d else (iso or "")
 
 
-def estado_garantia(iso: str, hoy: date | None = None) -> str:
+def estado_garantia(iso: str, hoy: date | None = None, dias: int | None = None) -> str:
     """'caducada' | 'proxima' | 'vigente' | 'sin_dato'"""
     d = fecha_a_date(iso)
     if d is None:
@@ -149,7 +160,7 @@ def estado_garantia(iso: str, hoy: date | None = None) -> str:
     hoy = hoy or date.today()
     if d < hoy:
         return "caducada"
-    if (d - hoy).days <= DIAS_AVISO_GARANTIA:
+    if (d - hoy).days <= (dias if dias is not None else _dias_aviso):
         return "proxima"
     return "vigente"
 

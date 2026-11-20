@@ -1,4 +1,4 @@
-name: Compilar InventarioPC.exe
+name: Compilar InventarioPC
 
 on:
   push:
@@ -13,6 +13,9 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    env:
+      # Para firmar el .exe y el instalador, añade los secretos CERT_PFX_BASE64 y CERT_PASSWORD al repositorio
+      HAY_CERTIFICADO: ${{ secrets.CERT_PFX_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,13 +28,21 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-build.txt
 
+      - name: Versión
+        id: version
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path inventario/__init__.py -Pattern '__version__ = "(.+)"').Matches[0].Groups[1].Value
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "Versión $v"
+
       - name: Tests
         run: python -m pytest -q tests
 
       - name: Compilar ejecutable
         run: python -m PyInstaller --noconfirm --clean InventarioPC.spec
 
-      - name: Probar el ejecutable
+      - name: Probar el ejecutable (autotest con interfaz, PDF, QR, deshacer y detección del equipo)
         shell: pwsh
         run: |
           $out = Join-Path $env:RUNNER_TEMP "selftest"
@@ -40,28 +51,97 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "El autotest del .exe ha fallado (código $($p.ExitCode))" }
           Get-Item dist\InventarioPC.exe | Select-Object Name, Length
 
-      - name: Subir artefacto
+      - name: Firmar el ejecutable (sólo si hay certificado configurado)
+        if: env.HAY_CERTIFICADO == 'true'
+        shell: pwsh
+        env:
+          CERT_PFX_BASE64: ${{ secrets.CERT_PFX_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_PFX_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          & $signtool.FullName sign /f $pfx /p $env:CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 dist\InventarioPC.exe
+          if ($LASTEXITCODE -ne 0) { throw "Fallo al firmar" }
+
+      - name: Instalar Inno Setup si no está
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Crear instalador
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.version.outputs.version }}" installer\InventarioPC.iss
+          if ($LASTEXITCODE -ne 0) { throw "Fallo al crear el instalador" }
+          Get-Item dist\InventarioPC-Setup-*.exe | Select-Object Name, Length
+
+      - name: Firmar el instalador (sólo si hay certificado configurado)
+        if: env.HAY_CERTIFICADO == 'true'
+        shell: pwsh
+        env:
+          CERT_PFX_BASE64: ${{ secrets.CERT_PFX_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          & $signtool.FullName sign /f $pfx /p $env:CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 (Get-Item dist\InventarioPC-Setup-*.exe).FullName
+          if ($LASTEXITCODE -ne 0) { throw "Fallo al firmar" }
+
+      - name: Probar el instalador (instalar, ejecutar y desinstalar en silencio)
+        shell: pwsh
+        run: |
+          $setup = (Get-Item dist\InventarioPC-Setup-*.exe).FullName
+          $dir = Join-Path $env:RUNNER_TEMP "instalado"
+          $p = Start-Process $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/TASKS=escritorio,abrircon", "/DIR=`"$dir`"" -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "La instalación ha fallado ($($p.ExitCode))" }
+          $exe = Join-Path $dir "InventarioPC.exe"
+          if (-not (Test-Path $exe)) { throw "No se ha instalado el ejecutable" }
+          $out = Join-Path $env:RUNNER_TEMP "selftest_instalado"
+          $q = Start-Process $exe -ArgumentList "--selftest", "`"$out`"" -PassThru -Wait
+          Get-Content (Join-Path $out "selftest.txt")
+          if ($q.ExitCode -ne 0) { throw "El programa instalado no arranca" }
+          $reg = Get-ItemProperty "HKCU:\Software\Classes\.xlsx\OpenWithProgids" -ErrorAction SilentlyContinue
+          if (-not ($reg.PSObject.Properties.Name -contains "InventarioPC.Importar")) { throw "No se registró «Abrir con» para .xlsx" }
+          $un = Join-Path $dir "unins000.exe"
+          $r = Start-Process $un -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -PassThru -Wait
+          Start-Sleep -Seconds 3
+          if (Test-Path $exe) { throw "La desinstalación no ha quitado el programa" }
+          Write-Host "Instalar / ejecutar / desinstalar: OK"
+
+      - name: Subir artefactos
         uses: actions/upload-artifact@v4
         with:
-          name: InventarioPC-windows
-          path: dist/InventarioPC.exe
+          name: InventarioPC-${{ steps.version.outputs.version }}-windows
+          path: |
+            dist/InventarioPC.exe
+            dist/InventarioPC-Setup-*.exe
           if-no-files-found: error
 
       - name: Publicar versión (tags v*)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/InventarioPC.exe
+          name: "Inventario de Equipos ${{ steps.version.outputs.version }}"
+          files: |
+            dist/InventarioPC.exe
+            dist/InventarioPC-Setup-*.exe
 
       - name: Publicar compilación de la rama
         if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: "Compilación ${{ github.run_number }} (${{ github.ref_name }})"
+          tag_name: v${{ steps.version.outputs.version }}-build.${{ github.run_number }}
+          name: "Inventario de Equipos ${{ steps.version.outputs.version }} (compilación ${{ github.run_number }})"
           target_commitish: ${{ github.sha }}
           prerelease: true
           body: |
-            InventarioPC.exe compilado automáticamente desde `${{ github.ref_name }}` (${{ github.sha }}).
-            Descarga `InventarioPC.exe` y ejecútalo; no necesita Python instalado.
-          files: dist/InventarioPC.exe
+            **Inventario de Equipos ${{ steps.version.outputs.version }}** compilado automáticamente desde `${{ github.ref_name }}`.
+
+            * `InventarioPC-Setup-${{ steps.version.outputs.version }}.exe` — **instalador** (recomendado): acceso directo en el escritorio y en el menú Inicio, «Abrir con» para archivos Excel y desinstalador. No necesita permisos de administrador.
+            * `InventarioPC.exe` — **versión portable**: un único archivo que se ejecuta sin instalar.
+
+            Ninguna de las dos necesita Python. Los datos se guardan en `%APPDATA%\InventarioPC` y se conservan al actualizar o desinstalar.
+          files: |
+            dist/InventarioPC.exe
+            dist/InventarioPC-Setup-*.exe

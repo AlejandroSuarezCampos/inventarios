@@ -15,8 +15,8 @@ import zlib
 from tkinter import font as tkfont
 from tkinter import ttk
 
-# ------------------------------------------------------------------ paleta
-C = {
+# ------------------------------------------------------------------ paletas
+CLARO = {
     "fondo": "#F5F5F7",        # fondo de la zona de contenido
     "lateral": "#E9E9EE",      # barra lateral
     "tarjeta": "#FFFFFF",
@@ -34,14 +34,93 @@ C = {
     "boton_pulsado": "#D2D2D7",
     "rojo": "#FF3B30",
     "rojo_suave": "#FFE9E7",
+    "rojo_pulsado": "#FFD6D2",
     "ambar": "#FF9500",
+    "ambar_texto": "#C76E00",
     "ambar_suave": "#FFF4DE",
     "verde": "#34C759",
     "verde_suave": "#E5F8EA",
     "fila_alterna": "#FAFAFC",
     "lateral_sel": "#D9D9E0",
     "lateral_hover": "#E0E0E6",
+    "pulgar": "#C7C7CC",
+    "pulgar_hover": "#A1A1A6",
+    "morado": "#5E5CE6",
 }
+
+OSCURO = {
+    "fondo": "#1C1C1E",
+    "lateral": "#252528",
+    "tarjeta": "#2C2C2E",
+    "texto": "#F5F5F7",
+    "secundario": "#A1A1A6",
+    "terciario": "#6E6E73",
+    "borde": "#48484A",
+    "borde_suave": "#3A3A3C",
+    "acento": "#0A84FF",
+    "acento_hover": "#2D96FF",
+    "acento_pulsado": "#0070DD",
+    "acento_suave": "#1A3350",
+    "boton": "#3A3A3C",
+    "boton_hover": "#48484A",
+    "boton_pulsado": "#545456",
+    "rojo": "#FF453A",
+    "rojo_suave": "#3D2422",
+    "rojo_pulsado": "#5C2C28",
+    "ambar": "#FF9F0A",
+    "ambar_texto": "#FFB340",
+    "ambar_suave": "#3B321F",
+    "verde": "#30D158",
+    "verde_suave": "#1E3B26",
+    "fila_alterna": "#313134",
+    "lateral_sel": "#3A3A3E",
+    "lateral_hover": "#313135",
+    "pulgar": "#5A5A5E",
+    "pulgar_hover": "#7C7C80",
+    "morado": "#7D7AFF",
+}
+
+C = dict(CLARO)  # paleta activa (se modifica en sitio con aplicar_modo antes de crear la interfaz)
+MODOS = ["Según Windows", "Claro", "Oscuro"]
+
+
+def windows_en_oscuro() -> bool:
+    """¿Tiene Windows activado el modo oscuro para aplicaciones?"""
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            return winreg.QueryValueEx(k, "AppsUseLightTheme")[0] == 0
+    except OSError:
+        return False
+
+
+def aplicar_modo(modo: str) -> bool:
+    """Activa la paleta clara u oscura. Devuelve True si queda en oscuro."""
+    oscuro = modo == "Oscuro" or (modo not in ("Claro", "Oscuro") and windows_en_oscuro())
+    C.clear()
+    C.update(OSCURO if oscuro else CLARO)
+    return oscuro
+
+
+def barra_titulo_oscura(ventana: tk.Misc, oscuro: bool) -> None:
+    """Pone oscura la barra de título de Windows 10/11 (DWMWA_USE_IMMERSIVE_DARK_MODE)."""
+    if os.name != "nt" or not oscuro:
+        return
+    try:
+        import ctypes
+        ventana.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(ventana.winfo_id())
+        valor = ctypes.c_int(1)
+        for atributo in (20, 19):
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, atributo, ctypes.byref(valor),
+                                                          ctypes.sizeof(valor)) == 0:
+                break
+    except Exception:  # noqa: BLE001
+        pass
+
 
 PALETA_GRAFICOS = ["#0071E3", "#5E5CE6", "#30B0C7", "#34C759", "#FF9500", "#FF2D55", "#AF52DE", "#A2845E"]
 
@@ -131,6 +210,59 @@ def chevron(color: str, tam: int = 10) -> bytes:
             fila += bytes((*rgb, int(255 * n / (ss * ss))))
         filas.append(bytes(fila))
     return _png(tam, tam, filas)
+
+
+def _dist_segmento(px_, py_, ax, ay, bx, by) -> float:
+    dx, dy = bx - ax, by - ay
+    t = max(0.0, min(1.0, ((px_ - ax) * dx + (py_ - ay) * dy) / (dx * dx + dy * dy)))
+    cx, cy = ax + t * dx, ay + t * dy
+    return ((px_ - cx) ** 2 + (py_ - cy) ** 2) ** 0.5
+
+
+def indicador(tam: int, margen: int, tipo: str, marcado: bool, fondo: str, borde: str, acento: str,
+              marca: str = "#FFFFFF", ss: int = 4) -> bytes:
+    """Casilla de verificación (tipo='casilla') o botón de opción (tipo='radio') antialias.
+    Se deja `margen` píxeles transparentes a la derecha para separarlo del texto."""
+    w, h = tam + margen, tam
+    r_esq = tam * 0.28 if tipo == "casilla" else tam / 2
+    relleno = _rgb(acento if marcado else fondo)
+    linea = _rgb(acento if marcado else borde)
+    blanco = _rgb(marca)
+    filas = []
+    for py in range(h):
+        fila = bytearray()
+        for px_ in range(w):
+            cob = cob_int = cob_marca = 0
+            for sy in range(ss):
+                for sx in range(ss):
+                    x, y = px_ + (sx + 0.5) / ss, py + (sy + 0.5) / ss
+                    if x > tam:
+                        continue
+                    if _cobertura(x, y, tam, tam, r_esq):
+                        cob += 1
+                        if _cobertura(x - 1, y - 1, tam - 2, tam - 2, max(0.0, r_esq - 1)):
+                            cob_int += 1
+                            if marcado:
+                                u, v = x / tam, y / tam
+                                if tipo == "casilla":
+                                    d = min(_dist_segmento(u, v, 0.26, 0.52, 0.43, 0.69),
+                                            _dist_segmento(u, v, 0.43, 0.69, 0.75, 0.33))
+                                    if d < 0.075:
+                                        cob_marca += 1
+                                elif (u - 0.5) ** 2 + (v - 0.5) ** 2 < 0.17 ** 2:
+                                    cob_marca += 1
+            total = ss * ss
+            if cob == 0:
+                fila += b"\x00\x00\x00\x00"
+                continue
+            a_borde = (cob - cob_int) / total
+            a_marca = cob_marca / total
+            a_rell = (cob_int - cob_marca) / total
+            alfa = a_borde + a_marca + a_rell
+            col = [(linea[i] * a_borde + blanco[i] * a_marca + relleno[i] * a_rell) / alfa for i in range(3)]
+            fila += bytes((int(col[0]), int(col[1]), int(col[2]), int(round(255 * alfa))))
+        filas.append(bytes(fila))
+    return _png(w, h, filas)
 
 
 # ------------------------------------------------------------------ tipografía
@@ -247,7 +379,7 @@ class Tema:
         # ---- botones
         self._boton(s, "TButton", C["boton"], C["boton_hover"], C["boton_pulsado"], C["texto"])
         self._boton(s, "Acento.TButton", C["acento"], C["acento_hover"], C["acento_pulsado"], "#FFFFFF", negrita=True)
-        self._boton(s, "Peligro.TButton", C["boton"], C["rojo_suave"], "#FFD6D2", C["rojo"])
+        self._boton(s, "Peligro.TButton", C["boton"], C["rojo_suave"], C["rojo_pulsado"], C["rojo"])
         # botón plano (sólo texto, fondo al pasar el ratón)
         transp = self.rr("plano_n", 7, None)
         hover = self.rr("plano_h", 7, C["boton"])
@@ -269,6 +401,19 @@ class Tema:
             ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "w"})]})]})])
         s.configure("Lateral.TButton", padding=(pad(10), pad(7)), background=C["lateral"], anchor="w",
                     foreground=C["texto"])
+
+        # ---- control segmentado (pestañas de las fichas)
+        seg_n = self.rr("seg_n", 7, None)
+        seg_h = self.rr("seg_h", 7, C["boton"])
+        seg_s = self.rr("seg_s", 7, C["tarjeta"], C["borde_suave"])
+        s.element_create("Segmento.bg", "image", seg_n, ("disabled", seg_n), ("selected", seg_s), ("active", seg_h),
+                         border=pad(7), sticky="nsew")
+        s.layout("Segmento.TButton", [("Segmento.bg", {"sticky": "nsew", "children": [
+            ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
+        s.configure("Segmento.TButton", padding=(pad(16), pad(6)), foreground=C["secundario"], anchor="center")
+        s.map("Segmento.TButton", foreground=[("disabled", C["terciario"]), ("selected", C["texto"])],
+              background=[("disabled", C["fondo"]), ("active", C["fondo"]), ("selected", C["fondo"]),
+                          ("pressed", C["fondo"])])
 
         # ---- campos de texto
         campo = self.rr("campo", 7, C["tarjeta"], C["borde"])
@@ -304,8 +449,8 @@ class Tema:
         s.map("Treeview.Heading", background=[("active", C["fondo"])], foreground=[("active", C["texto"])])
 
         # ---- barras de desplazamiento finas
-        pulgar = self.rr("pulgar", 4, "#C7C7CC")
-        pulgar_h = self.rr("pulgar_h", 4, "#A1A1A6")
+        pulgar = self.rr("pulgar", 4, C["pulgar"])
+        pulgar_h = self.rr("pulgar_h", 4, C["pulgar_hover"])
         for orient in ("Vertical", "Horizontal"):
             s.element_create(f"{orient}.Fino.thumb", "image", pulgar, ("active", pulgar_h), ("pressed", pulgar_h),
                              border=pad(4), sticky="nsew")
@@ -315,15 +460,27 @@ class Tema:
                         bordercolor=C["tarjeta"], lightcolor=C["tarjeta"], darkcolor=C["tarjeta"],
                         arrowsize=pad(9), width=pad(9), gripcount=0, relief="flat")
 
-        # ---- casillas y radios
-        for est in ("TCheckbutton", "TRadiobutton"):
-            s.configure(est, background=C["tarjeta"], foreground=C["texto"], indicatorbackground=C["tarjeta"],
-                        indicatorforeground=C["acento"], indicatorrelief="flat", focuscolor=C["tarjeta"],
-                        padding=pad(3), indicatormargin=(0, 0, pad(6), 0), upperbordercolor=C["borde"],
-                        lowerbordercolor=C["borde"])
-            s.map(est, background=[("active", C["tarjeta"])],
-                  indicatorbackground=[("selected", C["acento"]), ("pressed", C["acento_suave"])],
-                  indicatorforeground=[("selected", "#FFFFFF")])
+        # ---- casillas y radios (indicadores dibujados)
+        tam, margen = pad(16), pad(8)
+        for tipo, clase in (("casilla", "Checkbutton"), ("radio", "Radiobutton")):
+            imgs = {}
+            for nombre, marcado, fondo_i, borde_i, acento_i in (
+                    ("off", False, C["tarjeta"], C["borde"], C["acento"]),
+                    ("on", True, C["tarjeta"], C["borde"], C["acento"]),
+                    ("off_d", False, C["fondo"], C["borde_suave"], C["terciario"]),
+                    ("on_d", True, C["fondo"], C["borde_suave"], C["terciario"])):
+                imgs[nombre] = self.img(f"{tipo}_{nombre}",
+                                        indicador(tam, margen, tipo, marcado, fondo_i, borde_i, acento_i))
+            s.element_create(f"{clase}.ind", "image", imgs["off"],
+                             ("disabled", "selected", imgs["on_d"]), ("disabled", imgs["off_d"]),
+                             ("selected", imgs["on"]), sticky="")
+            s.layout(f"T{clase}", [(f"{clase}.padding", {"sticky": "nswe", "children": [
+                (f"{clase}.ind", {"side": "left", "sticky": ""}),
+                (f"{clase}.label", {"side": "left", "sticky": "nswe"})]})])
+            s.configure(f"T{clase}", background=C["tarjeta"], foreground=C["texto"], padding=(0, pad(3)),
+                        focuscolor=C["tarjeta"])
+            s.map(f"T{clase}", background=[("active", C["tarjeta"]), ("disabled", C["tarjeta"])],
+                  foreground=[("disabled", C["terciario"])])
 
         # ttk rellena las zonas transparentes con el «background» del estilo: el fondo debe coincidir
         # con el del contenedor. Variantes «Blanco.*» para widgets dentro de tarjetas.
